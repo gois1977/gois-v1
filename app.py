@@ -2177,10 +2177,8 @@ UNIFIED_OFFICE_HTML = """<!DOCTYPE html>
 </html>"""
 
 
-@app.get("/", response_class=HTMLResponse)
-@app.get("/admin", response_class=HTMLResponse)
-async def root():
-    return HTMLResponse(content=UNIFIED_OFFICE_HTML)
+# O Command Center é exclusivo da aplicação Desktop privada (gois_v1_Office.exe).
+# Na Web (https://gois-v1.onrender.com), é servida APENAS a app pública limpa goisAI!
 
 
 # =====================================================================
@@ -2207,8 +2205,8 @@ GOIS_AI_MANIFEST = {
     "name": "goisAI",
     "short_name": "goisAI",
     "description": "goisAI — Assistente de Inteligência Artificial Avançado.",
-    "start_url": "/goisai",
-    "scope": "/goisai",
+    "start_url": "/",
+    "scope": "/",
     "display": "standalone",
     "orientation": "portrait-primary",
     "background_color": "#090d16",
@@ -2821,6 +2819,7 @@ GOIS_AI_USER_APP_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+@app.get("/", response_class=HTMLResponse)
 @app.get("/goisai", response_class=HTMLResponse)
 @app.get("/chat", response_class=HTMLResponse)
 @app.get("/app", response_class=HTMLResponse)
@@ -2828,6 +2827,7 @@ async def serve_goisai_user_app():
     return HTMLResponse(content=GOIS_AI_USER_APP_HTML)
 
 
+@app.get("/manifest.json")
 @app.get("/goisai/manifest.json")
 async def serve_goisai_manifest():
     return JSONResponse(content=GOIS_AI_MANIFEST, media_type="application/manifest+json")

@@ -808,10 +808,10 @@ class GoisWindow:
 
     def open_user_app(self):
         import webbrowser
-        url = self.cfg["server"].rstrip("/") + "/goisai"
+        url = self.cfg["server"].rstrip("/")
         self.copy_text(url)
         webbrowser.open(url)
-        self.set_status(f"Link da App Pública copiado e aberto: {url}")
+        self.set_status(f"Link da App Pública goisAI copiado e aberto: {url}")
 
     def bind_keys(self):
         self.entry.bind("<Return>", self.on_enter)
