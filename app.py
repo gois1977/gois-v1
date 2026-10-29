@@ -42,33 +42,71 @@ Ajudas o utilizador com arquiteturas de software assíncronas, game design, Unit
 Mantém uma postura altamente técnica, precisa, prestativa e estruturada.
 """
 
-# --- FUNÇÃO DE LIGAÇÃO DIRETA E BLINDADA AO OPENROUTER ---
+# --- FUNÇÃO UNIVERSAL COM FAILOVER ROBUSTO ENTRE MÚLTIPLOS FORNECEDORES ---
 async def make_llm_request(payload: dict):
+    groq_key = os.environ.get("GROQ_API_KEY", "")
     openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+    mistral_key = os.environ.get("MISTRAL_API_KEY", "")
     
-    if not openrouter_key:
-        openrouter_key = os.environ.get("GROQ_API_KEY", "")
+    async with httpx.AsyncClient(timeout=35.0) as client:
+        
+        # 1. TENTATIVA: OpenRouter (DeepSeek)
+        if openrouter_key:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://gois-v1.onrender.com",
+                    "X-Title": "gois.v1 Command Center"
+                }
+                or_payload = {
+                    "model": "deepseek/deepseek-chat",
+                    "messages": payload.get("messages", []),
+                    "temperature": 0.7
+                }
+                resp = await client.post("https://openrouter.ai/api/v1/chat/completions", json=or_payload, headers=headers)
+                if resp.status_code == 200:
+                    return resp
+            except Exception:
+                pass
 
-    headers = {
-        "Authorization": f"Bearer {openrouter_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://gois-v1.onrender.com",
-        "X-Title": "gois.v1 Command Center"
-    }
-    
-    or_payload = {
-        "model": "deepseek/deepseek-chat",
-        "messages": payload.get("messages", []),
-        "temperature": 0.7
-    }
-    
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        try:
-            resp = await client.post("https://openrouter.ai/api/v1/chat/completions", json=or_payload, headers=headers)
-            return resp
-        except Exception as e:
-            print(f"Erro na ligação LLM: {e}")
-            return None
+        # 2. TENTATIVA: Groq (Llama 3.3)
+        if groq_key:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {groq_key}",
+                    "Content-Type": "application/json"
+                }
+                groq_payload = {
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": payload.get("messages", []),
+                    "temperature": 0.7
+                }
+                resp = await client.post("https://api.groq.com/openai/v1/chat/completions", json=groq_payload, headers=headers)
+                if resp.status_code == 200:
+                    return resp
+            except Exception:
+                pass
+
+        # 3. TENTATIVA: Mistral
+        if mistral_key:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {mistral_key}",
+                    "Content-Type": "application/json"
+                }
+                mistral_payload = {
+                    "model": "mistral-small-latest",
+                    "messages": payload.get("messages", []),
+                    "temperature": 0.7
+                }
+                resp = await client.post("https://api.mistral.ai/v1/chat/completions", json=mistral_payload, headers=headers)
+                if resp.status_code == 200:
+                    return resp
+            except Exception:
+                pass
+
+    return None
 
 # --- ROTAS DA API ---
 
@@ -112,10 +150,9 @@ async def process_chat(request: Request):
     if resp and resp.status_code == 200:
         return JSONResponse(content=resp.json())
 
-    error_detail = resp.text if resp else "Sem resposta do servidor externo"
     raise HTTPException(
         status_code=502,
-        detail=f"Erro na API OpenRouter: {error_detail}",
+        detail="Erro de Failover: Nenhum dos fornecedores de IA (OpenRouter, Groq, Mistral) respondeu com sucesso.",
     )
 
 @app.get("/api/settings")
