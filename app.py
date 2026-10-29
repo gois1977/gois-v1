@@ -2,10 +2,13 @@ import os
 import time
 import json
 import asyncio
+import logging
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+logger = logging.getLogger("uvicorn.error")
 
 # 1. INICIALIZAÇÃO DA APLICAÇÃO FASTAPI
 app = FastAPI(title="gois.v1 Command Center", version="1.0.0")
@@ -42,71 +45,73 @@ Ajudas o utilizador com arquiteturas de software assíncronas, game design, Unit
 Mantém uma postura altamente técnica, precisa, prestativa e estruturada.
 """
 
+# --- LISTA DE FORNECEDORES (ordem de tentativa) ---
+PROVIDERS = [
+    {
+        "name": "OpenRouter",
+        "env": "OPENROUTER_API_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "deepseek/deepseek-chat",
+        "extra_headers": {
+            "HTTP-Referer": "https://gois-v1.onrender.com",
+            "X-Title": "gois.v1 Command Center",
+        },
+    },
+    {
+        "name": "Groq",
+        "env": "GROQ_API_KEY",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "model": "llama-3.3-70b-versatile",
+        "extra_headers": {},
+    },
+    {
+        "name": "Mistral",
+        "env": "MISTRAL_API_KEY",
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "model": "mistral-small-latest",
+        "extra_headers": {},
+    },
+]
+
+
+@app.on_event("startup")
+async def check_keys_on_startup():
+    for p in PROVIDERS:
+        if os.environ.get(p["env"], "").strip():
+            logger.info(f"[CHAVES] {p['name']}: {p['env']} encontrada")
+        else:
+            logger.warning(f"[CHAVES] {p['name']}: {p['env']} NÃO definida no Environment do Render")
+
+
 # --- FUNÇÃO UNIVERSAL COM FAILOVER ROBUSTO ENTRE MÚLTIPLOS FORNECEDORES ---
 async def make_llm_request(payload: dict):
-    groq_key = os.environ.get("GROQ_API_KEY", "")
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-    mistral_key = os.environ.get("MISTRAL_API_KEY", "")
-    
     async with httpx.AsyncClient(timeout=35.0) as client:
-        
-        # 1. TENTATIVA: OpenRouter (DeepSeek)
-        if openrouter_key:
+        for p in PROVIDERS:
+            key = os.environ.get(p["env"], "").strip()
+            if not key:
+                logger.warning(f"{p['name']}: variável {p['env']} não definida, a saltar")
+                continue
             try:
                 headers = {
-                    "Authorization": f"Bearer {openrouter_key}",
+                    "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
-                    "HTTP-Referer": "https://gois-v1.onrender.com",
-                    "X-Title": "gois.v1 Command Center"
+                    **p["extra_headers"],
                 }
-                or_payload = {
-                    "model": "deepseek/deepseek-chat",
+                body = {
+                    "model": p["model"],
                     "messages": payload.get("messages", []),
-                    "temperature": 0.7
+                    "temperature": 0.7,
                 }
-                resp = await client.post("https://openrouter.ai/api/v1/chat/completions", json=or_payload, headers=headers)
+                resp = await client.post(p["url"], json=body, headers=headers)
                 if resp.status_code == 200:
+                    logger.info(f"{p['name']}: resposta OK")
                     return resp
-            except Exception:
-                pass
-
-        # 2. TENTATIVA: Groq (Llama 3.3)
-        if groq_key:
-            try:
-                headers = {
-                    "Authorization": f"Bearer {groq_key}",
-                    "Content-Type": "application/json"
-                }
-                groq_payload = {
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": payload.get("messages", []),
-                    "temperature": 0.7
-                }
-                resp = await client.post("https://api.groq.com/openai/v1/chat/completions", json=groq_payload, headers=headers)
-                if resp.status_code == 200:
-                    return resp
-            except Exception:
-                pass
-
-        # 3. TENTATIVA: Mistral
-        if mistral_key:
-            try:
-                headers = {
-                    "Authorization": f"Bearer {mistral_key}",
-                    "Content-Type": "application/json"
-                }
-                mistral_payload = {
-                    "model": "mistral-small-latest",
-                    "messages": payload.get("messages", []),
-                    "temperature": 0.7
-                }
-                resp = await client.post("https://api.mistral.ai/v1/chat/completions", json=mistral_payload, headers=headers)
-                if resp.status_code == 200:
-                    return resp
-            except Exception:
-                pass
+                logger.error(f"{p['name']}: HTTP {resp.status_code} - {resp.text[:300]}")
+            except Exception as e:
+                logger.error(f"{p['name']}: exceção {e!r}")
 
     return None
+
 
 # --- ROTAS DA API ---
 
@@ -115,16 +120,16 @@ async def make_llm_request(payload: dict):
 async def process_chat(request: Request):
     body = await request.json()
     messages = body.get("messages", []) or []
-    
+
     current_topic = SERVER_SETTINGS.get("current_topic", "Em espera...")
     classroom_active = SERVER_SETTINGS.get("classroom_mode", False)
     status_classroom = "Ativo e a aprender" if classroom_active else "Desativado"
-    
+
     system_parts = [
         GOIS_SYSTEM_PROMPT,
         f"[ESTADO DA SALA DE AULA AUTÓNOMA]: Modo: {status_classroom} | Tópico Atual / Em Estudo: {current_topic}"
     ]
-    
+
     if SKILLS_DB:
         blocks = ["[DIRECTRIZES E SKILLS DO NÚCLEO]:"]
         for s in SKILLS_DB:
@@ -152,12 +157,14 @@ async def process_chat(request: Request):
 
     raise HTTPException(
         status_code=502,
-        detail="Erro de Failover: Nenhum dos fornecedores de IA respondeu com sucesso.",
+        detail="Erro de Failover: Nenhum dos fornecedores de IA respondeu com sucesso. Vê os logs do Render.",
     )
+
 
 @app.get("/api/settings")
 async def get_settings():
     return SERVER_SETTINGS
+
 
 @app.post("/api/settings")
 @app.post("/api/classroom/toggle")
@@ -168,22 +175,30 @@ async def update_settings(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-        
+
     if "classroom_mode" in body:
         SERVER_SETTINGS["classroom_mode"] = bool(body["classroom_mode"])
     if "current_topic" in body:
         SERVER_SETTINGS["current_topic"] = str(body["current_topic"])
     SERVER_SETTINGS.update(body)
-    
-    return {"status": "success", "settings": SERVER_SETTINGS, "classroom_mode": SERVER_SETTINGS["classroom_mode"], "current_topic": SERVER_SETTINGS["current_topic"]}
+
+    return {
+        "status": "success",
+        "settings": SERVER_SETTINGS,
+        "classroom_mode": SERVER_SETTINGS["classroom_mode"],
+        "current_topic": SERVER_SETTINGS["current_topic"],
+    }
+
 
 @app.get("/api/knowledge")
 async def get_knowledge():
     return KNOWLEDGE_DB
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "online", "system": "gois.v1", "classroom_mode": SERVER_SETTINGS["classroom_mode"]}
+
 
 @app.get("/")
 async def root():
