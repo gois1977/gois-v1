@@ -894,12 +894,28 @@ app.add_middleware(
 )
 
 
-def build_system_message() -> str:
+def select_relevant_knowledge(user_query: str, max_items: int = 8) -> list:
+    if not KNOWLEDGE_DB:
+        return []
+    tokens = [w for w in re.findall(r"[a-zA-ZÀ-ÿ0-9_+#]{3,}", (user_query or "").lower()) if len(w) >= 3]
+    if not tokens:
+        return KNOWLEDGE_DB[:max_items]
+    scored = []
+    for idx, k in enumerate(KNOWLEDGE_DB):
+        hay = f"{k.get('category', '')} {k.get('title', '')} {k.get('content', '')}".lower()
+        hits = sum(3 if t in (k.get("title", "").lower()) else (1 if t in hay else 0) for t in tokens)
+        scored.append((hits, -idx, k))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    selected = [x[2] for x in scored[:max_items]]
+    return selected
+
+
+def build_system_message(user_query: str = "") -> str:
     system_parts = [GOIS_SYSTEM_PROMPT]
 
     if SKILLS_DB:
         blocks = [
-            "Especialidades e diretrizes técnicas (aplica apenas quando relevante para a tarefa; não listes isto em cumprimentos casuais):"
+            "Especialidades e diretrizes técnicas do gois.v1 (aplica quando relevante para a tarefa; não listes isto em cumprimentos casuais):"
         ]
         for s in SKILLS_DB:
             blocks.append(f"- {s.get('title', '')}: {s.get('content', '')}")
@@ -907,21 +923,27 @@ def build_system_message() -> str:
 
     comp = compute_comparison_metrics()
     ov = comp["overall"]
+    cat_summary = ", ".join(
+        f"{r['category']}: {r['gois_v1']}% ({r['lessons_count']} lições, Paridade Gemini {r['parity_vs_gemini']}%)"
+        for r in comp["categories"]
+    )
     system_parts.append(
-        f"Resumo de Domínio & Comparação Real Atual (usa apenas se o utilizador perguntar sobre a tua evolução ou comparação com Gemini/DeepSeek): "
+        f"Estado Real do Conhecimento do gois.v1 (usa quando relevante ou se o utilizador perguntar sobre o teu conhecimento/comparação): "
         f"Média Global gois.v1: {ov['gois_v1']}% vs Gemini: {ov['gemini']}% (Paridade: {ov['parity_vs_gemini']}%) "
         f"vs DeepSeek: {ov['deepseek']}% (Paridade: {ov['parity_vs_deepseek']}%) | "
-        f"Categorias ativas: {ov['total_categories']} ({ov['categories_studied']} já com lições estudadas, {ov['total_lessons']} lições no total)."
+        f"Total acumulado: {ov['total_lessons']} lições estudadas e {ov['total_skills']} skills em {ov['categories_studied']}/{ov['total_categories']} categorias. "
+        f"Detalhe por categoria: {cat_summary}."
     )
 
     if KNOWLEDGE_DB:
+        relevant = select_relevant_knowledge(user_query, max_items=8)
         blocks = [
-            f"Últimas lições aprendidas na Sala de Aula Autónoma ({len(KNOWLEDGE_DB)} lições no total):"
+            f"Conhecimento Real Aprendido pelo gois.v1 na Sala de Aula (relevante para esta conversa, de um total de {len(KNOWLEDGE_DB)} lições):"
         ]
-        for k in KNOWLEDGE_DB[:8]:
-            snippet = (k.get("content") or "").replace("\n", " ")[:240]
+        for k in relevant:
+            snippet = (k.get("content") or "").replace("\n", " ")[:480]
             teacher = k.get("teacher", "Modelo IA")
-            blocks.append(f"- [{k.get('category', 'Geral')}] {k.get('title', '')} (ensinado por {teacher}): {snippet}...")
+            blocks.append(f"- [{k.get('category', 'Geral')}] {k.get('title', '')} (destilado via {teacher}): {snippet}")
         system_parts.append("\n".join(blocks))
 
     return "\n\n".join(system_parts)
@@ -939,7 +961,13 @@ async def process_chat(request: Request):
         raise HTTPException(status_code=400, detail="Corpo do pedido inválido.")
     messages = body.get("messages", []) or []
 
-    formatted = [{"role": "system", "content": build_system_message()}]
+    last_user_query = ""
+    for m in reversed(messages):
+        if isinstance(m, dict) and m.get("role") == "user":
+            last_user_query = flatten_content(m.get("content"))
+            break
+
+    formatted = [{"role": "system", "content": build_system_message(last_user_query)}]
     for m in messages:
         if not isinstance(m, dict):
             continue
