@@ -1,0 +1,7 @@
+gois_keys.json
+.env
+__pycache__/
+build/
+dist/
+*.exe
+gois_window_config.json
