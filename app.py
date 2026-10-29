@@ -1435,6 +1435,7 @@ UNIFIED_OFFICE_HTML = """<!DOCTYPE html>
             <div class="status-dot"></div>
             <span>gois.v1 | Office & Command Center</span>
             <span id="header-status-badge" class="cloud-badge" onclick="refreshAll()" title="Clica para atualizar em tempo real">☁️ Online</span>
+            <a href="/goisai" target="_blank" class="cloud-badge" style="background:rgba(59,130,246,0.18); color:#93c5fd; border-color:#3b82f6; text-decoration:none;">📱 Abrir App Utilizador (goisAI)</a>
         </div>
         <div class="nav-tabs">
             <button class="nav-btn active" id="tab-btn-chat" onclick="switchView('view-chat', this)">💬 Chat</button>
@@ -2177,8 +2178,669 @@ UNIFIED_OFFICE_HTML = """<!DOCTYPE html>
 
 
 @app.get("/", response_class=HTMLResponse)
+@app.get("/admin", response_class=HTMLResponse)
 async def root():
     return HTMLResponse(content=UNIFIED_OFFICE_HTML)
+
+
+# =====================================================================
+# goisAI — APP PÚBLICA / MOBILE & WEB PARA UTILIZADORES (ESTILO GEMINI & DEEPSEEK)
+# Zero controlos de administrador · PWA Instalável em Android, iPhone (iOS) e PC
+# =====================================================================
+
+GOIS_AI_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="50%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="115" fill="#090d16"/>
+  <rect x="24" y="24" width="464" height="464" rx="95" fill="none" stroke="url(#g)" stroke-width="18"/>
+  <circle cx="256" cy="210" r="88" fill="none" stroke="url(#g)" stroke-width="28"/>
+  <circle cx="256" cy="210" r="32" fill="#10b981"/>
+  <path d="M148 378 C148 318, 364 318, 364 378" fill="none" stroke="url(#g)" stroke-width="28" stroke-linecap="round"/>
+</svg>"""
+
+GOIS_AI_MANIFEST = {
+    "name": "goisAI",
+    "short_name": "goisAI",
+    "description": "goisAI — Assistente de Inteligência Artificial Avançado.",
+    "start_url": "/goisai",
+    "scope": "/goisai",
+    "display": "standalone",
+    "orientation": "portrait-primary",
+    "background_color": "#090d16",
+    "theme_color": "#090d16",
+    "icons": [
+        {"src": "/goisai/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
+    ],
+}
+
+GOIS_AI_SW_JS = """
+const CACHE_NAME = 'goisai-pwa-v1';
+self.addEventListener('install', (e) => {
+  self.skipWaiting();
+});
+self.addEventListener('activate', (e) => {
+  e.waitUntil(self.clients.claim());
+});
+self.addEventListener('fetch', (e) => {
+  if (e.request.method !== 'GET') return;
+  e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+});
+"""
+
+GOIS_AI_USER_APP_HTML = """<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>goisAI</title>
+    <meta name="theme-color" content="#090d16">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="goisAI">
+    <link rel="manifest" href="/goisai/manifest.json">
+    <link rel="icon" type="image/svg+xml" href="/goisai/icon.svg">
+    <link rel="apple-touch-icon" href="/goisai/icon.svg">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        :root {
+            --bg: #090d16;
+            --sidebar: #0f1624;
+            --surface: #151e31;
+            --surface-hover: #1e2942;
+            --border: #222f49;
+            --text: #f3f4f6;
+            --muted: #94a3b8;
+            --accent: #3b82f6;
+            --emerald: #10b981;
+            --user-bubble: #2563eb;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg); color: var(--text);
+            height: 100dvh; width: 100vw; overflow: hidden;
+            display: flex;
+        }
+
+        /* Gaveta lateral de conversas (estilo Gemini / DeepSeek) */
+        .sidebar-backdrop {
+            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 40;
+        }
+        .sidebar {
+            width: 280px; background: var(--sidebar); border-right: 1px solid var(--border);
+            display: flex; flex-direction: column; z-index: 50; transition: transform 0.24s ease;
+        }
+        .sidebar-header {
+            padding: 16px; display: flex; align-items: center; justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+        }
+        .logo-wrap { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.15rem; letter-spacing: -0.3px; }
+        .logo-badge {
+            width: 30px; height: 30px; border-radius: 9px;
+            background: linear-gradient(135deg, #10b981, #3b82f6, #8b5cf6);
+            display: flex; align-items: center; justify-content: center; font-weight: 900; color: #fff; font-size: 0.9rem;
+        }
+        .new-chat-btn {
+            margin: 12px 14px; padding: 11px 14px; border-radius: 12px;
+            background: linear-gradient(135deg, rgba(16,185,129,0.18), rgba(59,130,246,0.22));
+            border: 1px solid rgba(59,130,246,0.45); color: #fff;
+            font-weight: 700; font-size: 0.88rem; cursor: pointer;
+            display: flex; align-items: center; gap: 8px; justify-content: center; transition: 0.18s;
+        }
+        .new-chat-btn:hover { background: rgba(59,130,246,0.35); }
+        .conv-list { flex: 1; overflow-y: auto; padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
+        .conv-item {
+            padding: 10px 12px; border-radius: 10px; font-size: 0.85rem; color: var(--muted);
+            cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        }
+        .conv-item:hover, .conv-item.active { background: var(--surface); color: #fff; }
+        .conv-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+        .conv-del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.85rem; padding: 2px 5px; }
+        .conv-del:hover { color: #ef4444; }
+        .sidebar-footer { padding: 12px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+        .install-btn {
+            width: 100%; padding: 10px 12px; border-radius: 10px;
+            background: var(--emerald); color: #04130e; border: none;
+            font-weight: 800; font-size: 0.84rem; cursor: pointer;
+            display: flex; align-items: center; justify-content: center; gap: 6px;
+        }
+
+        /* Área Principal */
+        .main { flex: 1; display: flex; flex-direction: column; height: 100dvh; overflow: hidden; position: relative; }
+        .topbar {
+            height: 56px; padding: 0 16px; border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; justify-content: space-between; background: rgba(9,13,22,0.88); backdrop-filter: blur(10px);
+        }
+        .menu-btn {
+            background: transparent; border: 1px solid var(--border); color: var(--text);
+            width: 38px; height: 38px; border-radius: 10px; font-size: 1.1rem; cursor: pointer;
+            display: none; align-items: center; justify-content: center;
+        }
+        .top-title { font-weight: 700; font-size: 1rem; display: flex; align-items: center; gap: 8px; }
+        .model-pill {
+            font-size: 0.72rem; padding: 3px 9px; border-radius: 99px;
+            background: rgba(16,185,129,0.14); color: #34d399; border: 1px solid rgba(16,185,129,0.4);
+        }
+        .top-action-btn {
+            background: var(--surface); border: 1px solid var(--border); color: var(--text);
+            padding: 7px 12px; border-radius: 10px; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+        }
+
+        /* Feed de Mensagens */
+        #chat-feed {
+            flex: 1; overflow-y: auto; padding: 20px 16px;
+            display: flex; flex-direction: column; gap: 18px; scroll-behavior: smooth;
+        }
+        .chat-inner { max-width: 780px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+
+        /* Ecrã Inicial estilo Gemini / DeepSeek */
+        .hero {
+            max-width: 680px; margin: auto; text-align: center; padding: 28px 14px;
+        }
+        .hero-icon {
+            width: 62px; height: 62px; border-radius: 20px; margin: 0 auto 16px;
+            background: linear-gradient(135deg, #10b981, #3b82f6, #8b5cf6);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.7rem; font-weight: 900; color: #fff; box-shadow: 0 10px 30px rgba(59,130,246,0.3);
+        }
+        .hero h1 {
+            font-size: 1.75rem; font-weight: 800; margin-bottom: 8px;
+            background: linear-gradient(90deg, #34d399, #60a5fa, #c084fc);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .hero p { color: var(--muted); font-size: 0.95rem; margin-bottom: 24px; }
+        .suggestions {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; text-align: left;
+        }
+        .sug-card {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+            padding: 14px; cursor: pointer; transition: 0.18s;
+        }
+        .sug-card:hover { background: var(--surface-hover); border-color: var(--accent); transform: translateY(-1px); }
+        .sug-title { font-weight: 700; font-size: 0.86rem; margin-bottom: 4px; color: #fff; }
+        .sug-desc { font-size: 0.78rem; color: var(--muted); }
+
+        /* Bolhas de mensagem */
+        .msg-row { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+        .msg-row.user { align-items: flex-end; }
+        .msg-row.assistant { align-items: flex-start; }
+        .bubble {
+            padding: 13px 16px; border-radius: 18px; font-size: 0.95rem; line-height: 1.6;
+            max-width: 88%; word-wrap: break-word;
+        }
+        .msg-row.user .bubble {
+            background: var(--user-bubble); color: #fff; border-bottom-right-radius: 4px;
+        }
+        .msg-row.assistant .bubble {
+            background: var(--surface); border: 1px solid var(--border); color: var(--text);
+            border-bottom-left-radius: 4px; width: 100%; max-width: 100%;
+        }
+        .bubble p { margin-bottom: 10px; }
+        .bubble p:last-child { margin-bottom: 0; }
+        .bubble ul, .bubble ol { margin: 6px 0 10px 22px; }
+        .bubble pre {
+            background: #060911; border: 1px solid #1e293b; border-radius: 10px;
+            padding: 12px; overflow-x: auto; margin: 10px 0; position: relative;
+        }
+        .bubble code { font-family: Consolas, monospace; font-size: 0.88rem; color: #a7f3d0; }
+        .msg-actions { display: flex; gap: 8px; padding-left: 4px; }
+        .act-btn {
+            background: transparent; border: none; color: var(--muted); font-size: 0.76rem;
+            cursor: pointer; padding: 3px 6px; border-radius: 6px;
+        }
+        .act-btn:hover { color: #fff; background: var(--surface); }
+
+        /* Barra de escrita Mobile-First */
+        .composer-wrap {
+            padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
+            background: linear-gradient(180deg, transparent, var(--bg) 25%);
+        }
+        .composer {
+            max-width: 780px; margin: 0 auto; background: var(--surface);
+            border: 1px solid var(--border); border-radius: 22px;
+            padding: 8px 10px 8px 16px; display: flex; align-items: flex-end; gap: 8px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+        }
+        .composer:focus-within { border-color: var(--accent); }
+        textarea#prompt-input {
+            flex: 1; background: transparent; border: none; color: var(--text);
+            font-size: 0.96rem; line-height: 1.45; max-height: 140px; resize: none; outline: none;
+            padding: 6px 0; font-family: inherit;
+        }
+        .icon-btn {
+            width: 38px; height: 38px; border-radius: 50%; border: none;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; font-size: 1rem; flex-shrink: 0; transition: 0.18s;
+        }
+        .mic-btn { background: transparent; color: var(--muted); }
+        .mic-btn:hover, .mic-btn.recording { background: rgba(239,68,68,0.2); color: #ef4444; }
+        .send-btn { background: var(--accent); color: #fff; font-weight: 800; }
+        .send-btn:hover { background: #2563eb; }
+        .stop-btn { background: #ef4444; color: #fff; display: none; }
+
+        /* Modal Instalar App */
+        .modal-backdrop {
+            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.72);
+            z-index: 100; align-items: center; justify-content: center; padding: 18px;
+        }
+        .modal {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
+            max-width: 420px; width: 100%; padding: 22px; text-align: left;
+        }
+        .modal h3 { margin-bottom: 8px; font-size: 1.1rem; }
+        .modal p { font-size: 0.86rem; color: var(--muted); line-height: 1.55; margin-bottom: 12px; }
+
+        @media (max-width: 820px) {
+            .sidebar { position: fixed; top: 0; bottom: 0; left: 0; transform: translateX(-100%); }
+            .sidebar.open { transform: translateX(0); }
+            .sidebar-backdrop.open { display: block; }
+            .menu-btn { display: flex; }
+            .bubble { max-width: 94%; }
+        }
+    </style>
+</head>
+<body>
+    <div id="backdrop" class="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
+
+    <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo-wrap">
+                <div class="logo-badge">G</div>
+                <span>goisAI</span>
+            </div>
+            <button class="act-btn" onclick="toggleSidebar(false)" style="font-size:1.1rem;">✕</button>
+        </div>
+        <button class="new-chat-btn" onclick="startNewConversation()">＋ Nova Conversa</button>
+        <div id="conv-list" class="conv-list"></div>
+        <div class="sidebar-footer">
+            <button id="install-pwa-btn" class="install-btn" onclick="triggerInstallApp()">📲 Instalar App goisAI</button>
+            <div style="font-size:0.72rem; color:var(--muted); text-align:center;">goisAI · Rápido, Privado & Inteligente</div>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="topbar">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <button class="menu-btn" onclick="toggleSidebar(true)">☰</button>
+                <div class="top-title">
+                    <span>goisAI</span>
+                    <span class="model-pill">gois.v1</span>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <button class="top-action-btn" onclick="startNewConversation()">＋ Novo</button>
+                <button class="top-action-btn" onclick="triggerInstallApp()">📲 Instalar</button>
+            </div>
+        </div>
+
+        <div id="chat-feed">
+            <div id="chat-inner" class="chat-inner"></div>
+        </div>
+
+        <div class="composer-wrap">
+            <div class="composer">
+                <textarea id="prompt-input" rows="1" placeholder="Pergunta qualquer coisa ao goisAI..."></textarea>
+                <button id="mic-btn" class="icon-btn mic-btn" onclick="toggleVoice()" title="Falar por voz">🎤</button>
+                <button id="stop-btn" class="icon-btn stop-btn" onclick="stopGeneration()" title="Parar">■</button>
+                <button id="send-btn" class="icon-btn send-btn" onclick="sendUserPrompt()" title="Enviar">↑</button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Modal de instalação para iOS / Android / Browser -->
+    <div id="install-modal" class="modal-backdrop" onclick="closeInstallModal()">
+        <div class="modal" onclick="event.stopPropagation()">
+            <h3>📲 Instalar a App goisAI</h3>
+            <p>Instala o <b>goisAI</b> no ecrã principal do teu telemóvel ou computador para abrir em ecrã inteiro como uma aplicação nativa:</p>
+            <p><b>📱 No Android (Chrome / Edge):</b><br>Toca no menu <b>⋮</b> (canto superior direito) e escolhe <b>"Instalar aplicação"</b> ou <b>"Adicionar ao ecrã principal"</b>.</p>
+            <p><b>🍏 No iPhone / iPad (Safari):</b><br>Toca no botão <b>Partilhar (⬆️)</b> em baixo e escolhe <b>"Adicionar ao ecrã principal"</b>.</p>
+            <p><b>💻 No Computador (Chrome / Edge):</b><br>Clica no ícone de instalação na barra de endereço à direita.</p>
+            <button class="install-btn" onclick="closeInstallModal()">Entendido</button>
+        </div>
+    </div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/goisai/sw.js').catch(() => {});
+        }
+
+        let deferredPrompt = null;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+        });
+
+        async function triggerInstallApp() {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                await deferredPrompt.userChoice;
+                deferredPrompt = null;
+            } else {
+                document.getElementById('install-modal').style.display = 'flex';
+            }
+        }
+        function closeInstallModal() {
+            document.getElementById('install-modal').style.display = 'none';
+        }
+
+        function toggleSidebar(open) {
+            document.getElementById('sidebar').classList.toggle('open', open);
+            document.getElementById('backdrop').classList.toggle('open', open);
+        }
+
+        // Gestão de múltiplas conversas no dispositivo do utilizador
+        const STORAGE_KEY = 'goisai_user_conversations_v1';
+        let conversations = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        let currentConvId = conversations[0] ? conversations[0].id : null;
+        let abortController = null;
+
+        function saveConversations() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations.slice(0, 40)));
+            renderSidebarList();
+        }
+
+        function getCurrentConv() {
+            let c = conversations.find(x => x.id === currentConvId);
+            if (!c) {
+                c = { id: 'c_' + Date.now(), title: 'Nova conversa', messages: [] };
+                conversations.unshift(c);
+                currentConvId = c.id;
+                saveConversations();
+            }
+            return c;
+        }
+
+        function renderSidebarList() {
+            const list = document.getElementById('conv-list');
+            list.innerHTML = '';
+            conversations.forEach(c => {
+                const item = document.createElement('div');
+                item.className = 'conv-item' + (c.id === currentConvId ? ' active' : '');
+                item.onclick = () => {
+                    currentConvId = c.id;
+                    renderSidebarList();
+                    renderMessages();
+                    toggleSidebar(false);
+                };
+                const title = document.createElement('div');
+                title.className = 'conv-title';
+                title.textContent = '💬 ' + (c.title || 'Nova conversa');
+                const del = document.createElement('button');
+                del.className = 'conv-del';
+                del.textContent = '🗑️';
+                del.onclick = (e) => {
+                    e.stopPropagation();
+                    conversations = conversations.filter(x => x.id !== c.id);
+                    if (currentConvId === c.id) {
+                        currentConvId = conversations[0] ? conversations[0].id : null;
+                    }
+                    saveConversations();
+                    renderMessages();
+                };
+                item.appendChild(title);
+                item.appendChild(del);
+                list.appendChild(item);
+            });
+        }
+
+        function startNewConversation() {
+            if (abortController) abortController.abort();
+            const c = { id: 'c_' + Date.now(), title: 'Nova conversa', messages: [] };
+            conversations.unshift(c);
+            currentConvId = c.id;
+            saveConversations();
+            renderMessages();
+            toggleSidebar(false);
+        }
+
+        function buildHeroHTML() {
+            return `
+                <div class="hero" id="hero-welcome">
+                    <div class="hero-icon">G</div>
+                    <h1>Olá, eu sou o goisAI</h1>
+                    <p>Como posso ajudar-te hoje?</p>
+                    <div class="suggestions">
+                        <div class="sug-card" onclick="quickAsk('Cria um código completo em Python ou C# bem estruturado e explica passo a passo.')">
+                            <div class="sug-title">💻 Programação & Código</div>
+                            <div class="sug-desc">Scripts completos em Python, C#, Unity, Web e APIs</div>
+                        </div>
+                        <div class="sug-card" onclick="quickAsk('Explica-me de forma clara e prática como funciona este conceito e dá exemplos reais.')">
+                            <div class="sug-title">🧠 Explicação & Estudo</div>
+                            <div class="sug-desc">Resumos diretos de ciência, engenharia e matemática</div>
+                        </div>
+                        <div class="sug-card" onclick="quickAsk('Ajuda-me a desenhar a arquitetura e mecânicas para um jogo 3D/2D.')">
+                            <div class="sug-title">🎮 Game Design & 3D</div>
+                            <div class="sug-desc">Mecânicas, física, shaders e sistemas de jogo</div>
+                        </div>
+                        <div class="sug-card" onclick="quickAsk('Escreve ou melhora um texto profissional em Português de Portugal.')">
+                            <div class="sug-title">✍️ Escrita & Ideias</div>
+                            <div class="sug-desc">Redação profissional, ideias, planeamento e revisão</div>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        function attachCodeCopy(container) {
+            container.querySelectorAll('pre').forEach(pre => {
+                if (pre.querySelector('.cp-btn')) return;
+                const btn = document.createElement('button');
+                btn.className = 'act-btn cp-btn';
+                btn.style.cssText = 'position:absolute; top:6px; right:6px; background:#151e31; border:1px solid #222f49; color:#fff; padding:2px 8px;';
+                btn.innerText = 'Copiar';
+                btn.onclick = () => {
+                    const code = pre.querySelector('code') ? pre.querySelector('code').innerText : pre.innerText;
+                    navigator.clipboard.writeText(code.trim());
+                    btn.innerText = 'Copiado!';
+                    setTimeout(() => btn.innerText = 'Copiar', 1500);
+                };
+                pre.appendChild(btn);
+            });
+        }
+
+        function appendBubble(role, content) {
+            const inner = document.getElementById('chat-inner');
+            const hero = document.getElementById('hero-welcome');
+            if (hero) hero.remove();
+
+            const row = document.createElement('div');
+            row.className = 'msg-row ' + role;
+            const bubble = document.createElement('div');
+            bubble.className = 'bubble';
+
+            if (role === 'assistant') {
+                bubble.innerHTML = marked.parse(content || '');
+                attachCodeCopy(bubble);
+            } else {
+                bubble.textContent = content;
+            }
+            row.appendChild(bubble);
+
+            if (role === 'assistant') {
+                const actions = document.createElement('div');
+                actions.className = 'msg-actions';
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'act-btn';
+                copyBtn.innerText = '📋 Copiar';
+                copyBtn.onclick = () => {
+                    navigator.clipboard.writeText(bubble.innerText.trim());
+                    copyBtn.innerText = '✅ Copiado';
+                    setTimeout(() => copyBtn.innerText = '📋 Copiar', 1500);
+                };
+                actions.appendChild(copyBtn);
+                row.appendChild(actions);
+            }
+
+            inner.appendChild(row);
+            const feed = document.getElementById('chat-feed');
+            feed.scrollTop = feed.scrollHeight;
+            return bubble;
+        }
+
+        function renderMessages() {
+            const inner = document.getElementById('chat-inner');
+            const conv = getCurrentConv();
+            if (!conv.messages.length) {
+                inner.innerHTML = buildHeroHTML();
+                return;
+            }
+            inner.innerHTML = '';
+            conv.messages.forEach(m => appendBubble(m.role, m.content));
+        }
+
+        function quickAsk(text) {
+            const input = document.getElementById('prompt-input');
+            input.value = text;
+            sendUserPrompt();
+        }
+
+        const promptInput = document.getElementById('prompt-input');
+        promptInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 140) + 'px';
+        });
+        promptInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 768) {
+                e.preventDefault();
+                sendUserPrompt();
+            }
+        });
+
+        function stopGeneration() {
+            if (abortController) abortController.abort();
+        }
+
+        async function sendUserPrompt() {
+            const text = promptInput.value.trim();
+            if (!text || abortController) return;
+            promptInput.value = '';
+            promptInput.style.height = 'auto';
+
+            const conv = getCurrentConv();
+            if (conv.messages.length === 0) {
+                conv.title = text.slice(0, 34) + (text.length > 34 ? '…' : '');
+            }
+            conv.messages.push({ role: 'user', content: text });
+            saveConversations();
+            appendBubble('user', text);
+
+            const botBubble = appendBubble('assistant', '...');
+            document.getElementById('send-btn').style.display = 'none';
+            document.getElementById('stop-btn').style.display = 'flex';
+            abortController = new AbortController();
+            let reply = '';
+
+            try {
+                const res = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                    body: JSON.stringify({ messages: conv.messages.slice(-24), stream: true }),
+                    signal: abortController.signal
+                });
+                if (!res.ok) throw new Error('Servidor ocupado, tenta novamente em instantes.');
+
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+                const feed = document.getElementById('chat-feed');
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\\n');
+                    buffer = lines.pop() || '';
+                    for (const raw of lines) {
+                        const line = raw.trim();
+                        if (!line.startsWith('data:')) continue;
+                        const dataStr = line.slice(5).trim();
+                        if (!dataStr || dataStr === '[DONE]') continue;
+                        try {
+                            const obj = JSON.parse(dataStr);
+                            const delta = ((obj.choices || [])[0] || {}).delta || {};
+                            if (delta.content) {
+                                reply += delta.content;
+                                botBubble.innerHTML = marked.parse(reply);
+                                feed.scrollTop = feed.scrollHeight;
+                            }
+                        } catch (_) {}
+                    }
+                }
+                attachCodeCopy(botBubble);
+                conv.messages.push({ role: 'assistant', content: reply || 'Sem resposta.' });
+                saveConversations();
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    reply = reply ? (reply + '\\n\\n*(interrompido)*') : '*(cancelado)*';
+                    botBubble.innerHTML = marked.parse(reply);
+                } else {
+                    botBubble.innerHTML = `<span style="color:#f87171;">${err.message || 'Erro de ligação.'}</span>`;
+                }
+            } finally {
+                abortController = null;
+                document.getElementById('stop-btn').style.display = 'none';
+                document.getElementById('send-btn').style.display = 'flex';
+            }
+        }
+
+        // Reconhecimento de Voz (Microfone Mobile / Desktop)
+        let recognition = null;
+        function toggleVoice() {
+            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SR) return alert('O teu navegador não suporta ditado por voz direto.');
+            const micBtn = document.getElementById('mic-btn');
+            if (recognition) {
+                recognition.stop();
+                recognition = null;
+                micBtn.classList.remove('recording');
+                return;
+            }
+            recognition = new SR();
+            recognition.lang = 'pt-PT';
+            recognition.interimResults = false;
+            micBtn.classList.add('recording');
+            recognition.onresult = (e) => {
+                const transcript = e.results[0][0].transcript;
+                promptInput.value = (promptInput.value ? promptInput.value + ' ' : '') + transcript;
+            };
+            recognition.onend = () => {
+                micBtn.classList.remove('recording');
+                recognition = null;
+            };
+            recognition.start();
+        }
+
+        renderSidebarList();
+        renderMessages();
+    </script>
+</body>
+</html>"""
+
+
+@app.get("/goisai", response_class=HTMLResponse)
+@app.get("/chat", response_class=HTMLResponse)
+@app.get("/app", response_class=HTMLResponse)
+async def serve_goisai_user_app():
+    return HTMLResponse(content=GOIS_AI_USER_APP_HTML)
+
+
+@app.get("/goisai/manifest.json")
+async def serve_goisai_manifest():
+    return JSONResponse(content=GOIS_AI_MANIFEST, media_type="application/manifest+json")
+
+
+@app.get("/goisai/icon.svg")
+async def serve_goisai_icon():
+    return StreamingResponse(iter([GOIS_AI_ICON_SVG]), media_type="image/svg+xml")
+
+
+@app.get("/goisai/sw.js")
+async def serve_goisai_sw():
+    return StreamingResponse(iter([GOIS_AI_SW_JS]), media_type="application/javascript")
 
 
 if __name__ == "__main__":

@@ -401,8 +401,8 @@ class GoisWindow:
         self.status = tk.Label(top, text="A ligar ao servidor...", bg=T["panel"], fg=T["muted"], font=FONT_SMALL, anchor="w")
         self.status.pack(side="left", fill="x", expand=True, padx=8)
 
-        for text, cmd in (("Definições", self.open_settings), ("☁️ Sincronizar", self.sync)):
-            self.make_button(top, text, cmd, padx=10, pady=4).pack(side="right", padx=3, pady=6)
+        for text, cmd in (("Definições", self.open_settings), ("☁️ Sincronizar", self.sync), ("📱 App goisAI", self.open_user_app)):
+            self.make_button(top, text, cmd, kind="blue" if "goisAI" in text else "default", padx=10, pady=4).pack(side="right", padx=3, pady=6)
 
         tk.Frame(self.root, bg=T["border"], height=1).pack(fill="x")
 
@@ -805,6 +805,13 @@ class GoisWindow:
         elif tab_key == "skills":
             self.view_skills.pack(fill="both", expand=True)
             self.refresh_skills_from_server()
+
+    def open_user_app(self):
+        import webbrowser
+        url = self.cfg["server"].rstrip("/") + "/goisai"
+        self.copy_text(url)
+        webbrowser.open(url)
+        self.set_status(f"Link da App Pública copiado e aberto: {url}")
 
     def bind_keys(self):
         self.entry.bind("<Return>", self.on_enter)
