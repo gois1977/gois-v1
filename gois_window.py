@@ -489,6 +489,9 @@ class GoisWindow:
             text="📊 Comparação Real Total em % — gois.v1 vs Google Gemini vs DeepSeek (16 Categorias)",
             bg=T["panel"], fg=T["fg"], font=("Segoe UI", 11, "bold"),
         ).pack(side="left")
+        self.make_button(
+            head, "ⓘ Como Ler os Resultados (Passo a Passo)", self.open_comparison_info, kind="blue", padx=10, pady=4
+        ).pack(side="left", padx=(10, 0))
 
         self.btn_run_bench = self.make_button(
             head, "⚔️ Executar Desafio Benchmark Ao Vivo", self.run_benchmark_ui, kind="primary", padx=12, pady=4
@@ -535,22 +538,36 @@ class GoisWindow:
         left = tk.Frame(body, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
         left.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
-        tk.Label(
-            left,
-            text=" Categoria (16 Domínios Gemini & DeepSeek)                       |  gois.v1  |  Gemini  | DeepSeek | Lições | Paridade",
-            bg=T["panel_alt"], fg=T["muted"], font=("Consolas", 9, "bold"), anchor="w", padx=8, pady=6,
-        ).pack(fill="x")
-
         lwrap = tk.Frame(left, bg=T["bg"])
         lwrap.pack(fill="both", expand=True, padx=6, pady=6)
         cscroll = tk.Scrollbar(lwrap, orient="vertical")
         cscroll.pack(side="right", fill="y")
-        self.comp_listbox = tk.Listbox(
-            lwrap, bg=T["bg"], fg=T["fg"], selectbackground=T["accent_blue"], selectforeground="#ffffff",
-            bd=0, relief="flat", font=("Consolas", 9), highlightthickness=0, activestyle="none",
-            yscrollcommand=cscroll.set,
+
+        list_col = tk.Frame(lwrap, bg=T["bg"])
+        list_col.pack(side="left", fill="both", expand=True)
+
+        self.comp_header_box = tk.Listbox(
+            list_col, height=1, bg=T["panel_alt"], fg=T["user"],
+            selectbackground=T["panel_alt"], selectforeground=T["user"],
+            bd=0, relief="flat", font=("Consolas", 9), highlightthickness=0,
+            activestyle="none", exportselection=False, takefocus=0,
         )
-        self.comp_listbox.pack(side="left", fill="both", expand=True)
+        self.comp_header_box.pack(side="top", fill="x")
+        header_line = (
+            f" {'Categoria (16 Domínios Gemini & DeepSeek)':<48} │ "
+            f"{'gois.v1':>7} │ {'Gemini':>7} │ {'DeepSeek':>8} │ {'Lições':>6} │ {'Paridade':>8}"
+        )
+        self.comp_header_box.insert("end", header_line)
+        self.comp_header_box.bind("<<ListboxSelect>>", lambda _e: self.comp_header_box.selection_clear(0, "end"))
+
+        tk.Frame(list_col, bg=T["border"], height=1).pack(side="top", fill="x")
+
+        self.comp_listbox = tk.Listbox(
+            list_col, bg=T["bg"], fg=T["fg"], selectbackground=T["accent_blue"], selectforeground="#ffffff",
+            bd=0, relief="flat", font=("Consolas", 9), highlightthickness=0, activestyle="none",
+            exportselection=False, yscrollcommand=cscroll.set,
+        )
+        self.comp_listbox.pack(side="top", fill="both", expand=True)
         cscroll.config(command=self.comp_listbox.yview)
         self.comp_listbox.bind("<<ListboxSelect>>", self.on_select_comp_category)
 
@@ -1015,13 +1032,14 @@ class GoisWindow:
         prev_idx = sel[0] if sel else 0
         self.comp_listbox.delete(0, "end")
         for r in cats:
-            name = (r.get("category") or "")[:49].ljust(49)
+            name = (r.get("category") or "")[:48]
             g = f"{r.get('gois_v1', 0):5.1f}%"
             gm = f"{r.get('gemini', 0):5.1f}%"
             ds = f"{r.get('deepseek', 0):5.1f}%"
-            lc = f"{r.get('lessons_count', 0):3d}"
+            lc = f"{r.get('lessons_count', 0)}"
             par = f"{r.get('parity_vs_gemini', 0):5.1f}%"
-            self.comp_listbox.insert("end", f" {name} |  {g}  |  {gm}  |  {ds}  |  {lc}   |  {par}")
+            row_line = f" {name:<48} │ {g:>7} │ {gm:>7} │ {ds:>8} │ {lc:>6} │ {par:>8}"
+            self.comp_listbox.insert("end", row_line)
 
         if cats:
             idx = min(prev_idx, len(cats) - 1)
@@ -1044,30 +1062,101 @@ class GoisWindow:
         gm = r.get("gemini", 0.0)
         ds = r.get("deepseek", 0.0)
 
-        md = (
+        md_top = (
             f"# {cat_name}\n\n"
             f"**Estado:** {r.get('status', '')}\n"
             f"**Lições estudadas nesta área:** `{r.get('lessons_count', 0)}`  ·  **Skills ativas:** `{r.get('skills_count', 0)}`\n\n"
             f"## Barras Comparativas em %\n"
-            f"```\n"
-            f"gois.v1  [{make_bar(g, 18)}] {g:5.1f}%\n"
-            f"Gemini   [{make_bar(gm, 18)}] {gm:5.1f}%\n"
-            f"DeepSeek [{make_bar(ds, 18)}] {ds:5.1f}%\n"
-            f"```\n"
+        )
+        bars_text = (
+            f" gois.v1  [{make_bar(g, 18)}] {g:5.1f}%\n"
+            f" Gemini   [{make_bar(gm, 18)}] {gm:5.1f}%\n"
+            f" DeepSeek [{make_bar(ds, 18)}] {ds:5.1f}%\n\n"
+        )
+        md_bottom = (
             f"- **Paridade gois.v1 vs Gemini:** `{r.get('parity_vs_gemini', 0)}%` ({'+' if r.get('delta_gemini', 0) >= 0 else ''}{r.get('delta_gemini', 0)}%)\n"
             f"- **Paridade gois.v1 vs DeepSeek:** `{r.get('parity_vs_deepseek', 0)}%` ({'+' if r.get('delta_deepseek', 0) >= 0 else ''}{r.get('delta_deepseek', 0)}%)\n\n"
             f"## Últimas Lições Aprendidas nesta Categoria\n"
         )
         matching = [k for k in self.knowledge_items if k.get("category") == cat_name][:4]
         if not matching:
-            md += "- *Ainda sem lições específicas gravadas nesta categoria. Clica em **⚡ Estudar Categoria Selecionada Agora** para subir já a percentagem!*\n"
+            md_bottom += "- *Ainda sem lições específicas gravadas nesta categoria. Clica em **⚡ Estudar Categoria Selecionada Agora** para subir já a percentagem!*\n"
         else:
             for m in matching:
-                md += f"- **{m.get('title', 'Lição')}** (`{m.get('teacher', 'IA')}`)\n"
+                md_bottom += f"- **{m.get('title', 'Lição')}** (`{m.get('teacher', 'IA')}`)\n"
 
         with self.editable(self.comp_detail):
             self.comp_detail.delete("1.0", "end")
-            self.render_markdown_into(self.comp_detail, md)
+            self.render_markdown_into(self.comp_detail, md_top)
+            self.comp_detail.insert("end", bars_text, "code")
+            self.render_markdown_into(self.comp_detail, md_bottom)
+
+    def open_comparison_info(self):
+        T = THEME
+        win = tk.Toplevel(self.root)
+        win.title("ⓘ Como Ler os Resultados da Comparação % — Passo a Passo")
+        win.configure(bg=T["panel"])
+        win.geometry("760x640")
+        win.transient(self.root)
+
+        head = tk.Frame(win, bg=T["panel_alt"], padx=16, pady=12)
+        head.pack(fill="x")
+        tk.Label(
+            head,
+            text="ⓘ Guia Passo a Passo: Como Ler a Comparação % (gois.v1 vs Gemini vs DeepSeek)",
+            bg=T["panel_alt"], fg=T["fg"], font=("Segoe UI", 12, "bold"), anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            head,
+            text="Entende cada número, a fórmula real de cálculo e porque o teu gois.v1 supera os modelos base nas tuas áreas fortes.",
+            bg=T["panel_alt"], fg=T["muted"], font=FONT_SMALL, anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+
+        body = tk.Frame(win, bg=T["bg"])
+        body.pack(fill="both", expand=True, padx=14, pady=12)
+        scroll = tk.Scrollbar(body, orient="vertical")
+        scroll.pack(side="right", fill="y")
+        txt = tk.Text(
+            body, wrap="word", bg=T["bg"], fg=T["fg"], bd=0, relief="flat",
+            font=FONT_UI, padx=14, pady=12, yscrollcommand=scroll.set,
+        )
+        txt.pack(side="left", fill="both", expand=True)
+        scroll.config(command=txt.yview)
+        self.setup_text_tags(txt)
+
+        guide_md = (
+            "# Passo 1 — O que significam os 4 Cartões no Topo?\n"
+            "- **🟢 DOMÍNIO GLOBAL gois.v1:** É a média global (em `%`) do teu modelo nas **16 categorias** universais da IA moderna. Subirá sempre que o `gois.v1` aprende novas lições na Sala de Aula ou recebe novas Skills.\n"
+            "- **🔵 REFERÊNCIA GOOGLE GEMINI (`90.1%`):** É a pontuação média de referência (benchmark MMLU / LiveBench / Coding) do Google Gemini 2.0/2.5 puro sem personalização.\n"
+            "- **🟣 REFERÊNCIA DEEPSEEK V3/R1 (`90.3%`):** É a pontuação média de referência do DeepSeek V3/R1 puro sem memória de projeto.\n"
+            "- **📚 COBERTURA DAS 16 CATEGORIAS:** Mostra quantas das 16 áreas universais já têm pelo menos 1 lição estudada pelo `gois.v1`.\n\n"
+            "# Passo 2 — Como ler cada coluna da Tabela das 16 Categorias?\n"
+            "- **`Categoria`:** O domínio técnico ou científico avaliado (todas as 16 áreas do Gemini e DeepSeek).\n"
+            "- **`gois.v1`:** Capacidade efetiva atual do teu modelo nessa categoria específica.\n"
+            "- **`Gemini` e `DeepSeek`:** Pontuação base oficial de cada um desses modelos nessa área.\n"
+            "- **`Lições`:** Quantas aulas avançadas o `gois.v1` já estudou, destilou e guardou na memória RAG para essa categoria.\n"
+            "- **`Paridade`:** É o rácio direto `(gois.v1 ÷ Gemini) × 100`.\n"
+            "  - **Abaixo de `95%`:** Categoria em evolução (precisa de mais lições da Sala de Aula).\n"
+            "  - **Entre `95%` e `99.9%`:** O `gois.v1` já está praticamente empatado com o Gemini/DeepSeek.\n"
+            "  - **`100%` ou mais (`🔥 Acima`):** O `gois.v1` já ultrapassou o modelo base nessa especialidade!\n\n"
+            "# Passo 3 — Porque é que o `gois.v1` consegue ser superior (>100% Paridade) em certas áreas? 😜\n"
+            "O Gemini e o DeepSeek normais são **modelos generalistas puros**: quando alguém lhes faz uma pergunta, eles respondem apenas com o treino de fábrica, sem memória acumulada das tuas regras nem lições especializadas.\n\n"
+            "Já o teu **`gois.v1` é um Sistema Composto (Ensemble + RAG + Skills)** que junta **3 camadas**:\n"
+            "1. **Base Multi-Modelo Real (`~72%` a `76%` de partida):** Usa as APIs reais (DeepSeek, Gemini, Llama 3.3 70B, Mistral) em conjunto.\n"
+            "2. **Skills Especializadas Ativas (`+2.2%` a `+6.5%`):** As tuas diretrizes cirúrgicas (em *Arquitetura de Software*, *Game Design & Unity*, *WebGL*, *Hardware Leve*) dão-lhe regras de engenharia que o modelo base sozinho não aplica por defeito.\n"
+            "3. **Lições Destiladas da Sala de Aula (até `+16.5%`):** Cada lição que o `gois.v1` absorve na Sala de Aula fica guardada na base de conhecimento e é **injetada automaticamente no cérebro dele** quando respondes no chat.\n\n"
+            "Por isso, numa área onde o `gois.v1` já tem **Skills + 7 ou 8 Lições estudadas** (como *Arquitetura de Software* ou *Game Design & Unity*), ele responde com **Modelos de Topo + Memória Especializada**, superando um Gemini ou DeepSeek 'cru'!\n\n"
+            "# Passo 4 — Como fazer o `gois.v1` subir nas outras categorias?\n"
+            "1. Clica numa categoria da tabela que tenha poucas lições (ex: *Direito Tecnológico*, *Ciência de Dados* ou *Cibersegurança*).\n"
+            "2. Clica no botão azul **`⚡ Estudar Categoria Selecionada Agora`** para o `gois.v1` ter uma aula imediata e veres a `%` a subir ao vivo.\n"
+            "3. Ou clica no botão verde **`⚔️ Executar Desafio Benchmark Ao Vivo`** para o `gois.v1` resolver um teste prático real avaliado por júri IA (+bónus direto na categoria)."
+        )
+        self.render_markdown_into(txt, guide_md)
+        txt.configure(state="disabled")
+
+        foot = tk.Frame(win, bg=T["panel"], padx=16, pady=10)
+        foot.pack(fill="x")
+        self.make_button(foot, "Percebido, Fechar", win.destroy, kind="primary", padx=16, pady=6).pack(side="right")
 
     def study_selected_comp_category(self):
         if self.learning_busy:

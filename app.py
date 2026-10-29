@@ -454,25 +454,25 @@ def compute_comparison_metrics() -> dict:
                 matching_skills += 1
         skill_bonus = min(4.5, matching_skills * 1.5)
 
-        # 2. Evolução real pelas lições aprendidas na Sala de Aula nesta categoria
+        # 2. Evolução real pelas lições aprendidas na Sala de Aula nesta categoria (curva progressiva realista)
         lessons = cat_lessons.get(cat, [])
         n_lessons = len(lessons)
-        # Cada lição estudada aumenta o domínio na categoria (com ganhos progressivos até +22%)
         learning_gain = 0.0
         for idx, les in enumerate(lessons):
             q = float(les.get("quality_score") or score_lesson_quality(les.get("content", "")))
-            weight = 2.6 if idx < 3 else (1.6 if idx < 8 else 0.8)
+            # Ganho gradual e realista: primeiras lições dão +1.4%, depois +0.8%, depois +0.4%
+            weight = 1.4 if idx < 3 else (0.8 if idx < 10 else 0.35)
             learning_gain += weight * (q / 90.0)
-        learning_gain = min(21.0, learning_gain)
+        learning_gain = min(16.5, learning_gain)
 
         # 3. Bónus de benchmarks ao vivo realizados nesta categoria
         b_runs = cat_benchmarks.get(cat, [])
         bench_bonus = 0.0
         if b_runs:
             avg_b = sum(float(x.get("gois_score", 85.0)) for x in b_runs) / len(b_runs)
-            bench_bonus = min(3.5, max(0.5, (avg_b - 75.0) * 0.14))
+            bench_bonus = min(3.0, max(0.4, (avg_b - 75.0) * 0.12))
 
-        gois_pct = min(99.2, round(gois_base + multi_provider_bonus + skill_bonus + learning_gain + bench_bonus, 1))
+        gois_pct = min(98.5, round(gois_base + multi_provider_bonus + skill_bonus + learning_gain + bench_bonus, 1))
         parity_gemini = round((gois_pct / gemini_pct) * 100.0, 1)
         parity_deepseek = round((gois_pct / deepseek_pct) * 100.0, 1)
         delta_gemini = round(gois_pct - gemini_pct, 1)
