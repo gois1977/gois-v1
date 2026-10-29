@@ -155,7 +155,7 @@ SERVER_SETTINGS = {
     "classroom_mode": True,
     "learning_now": False,
     "current_topic": "A aguardar próximo ciclo de estudo...",
-    "current_teacher": "Rotação Automática (DeepSeek / Gemini / Llama / Mistral)",
+    "current_teacher": "Rotação Automática (DeepSeek / Gemini / GPT-OSS / Mistral)",
     "last_learned_title": "",
     "last_learned_at": "",
     "last_teacher": "",
@@ -298,6 +298,11 @@ Regras de comportamento:
 4. Quando o utilizador perguntar o que estás a aprender, o que já aprendeste ou como estás na comparação com o Gemini e o DeepSeek, responde com base nos dados reais da tua Sala de Aula e da matriz de comparação presente no contexto.
 5. Quando o pedido for técnico ou de programação, sê rigoroso e completo: entrega código funcional, limpo, bem estruturado e sem omissões preguiçosas."""
 
+# O Groq retirou o llama-3.3-70b-versatile a 16/08/2026 (contas gratuitas/developer) e passou a responder 404.
+# Substituto recomendado pelo Groq: openai/gpt-oss-120b. Para trocar de modelo no futuro basta definir
+# GROQ_MODEL no Environment do Render, sem mexer no código.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "").strip() or "openai/gpt-oss-120b"
+
 PROVIDERS = [
     {
         "name": "OpenRouter",
@@ -313,7 +318,7 @@ PROVIDERS = [
         "name": "Groq",
         "env": "GROQ_API_KEY",
         "url": "https://api.groq.com/openai/v1/chat/completions",
-        "model": "llama-3.3-70b-versatile",
+        "model": GROQ_MODEL,
         "extra_headers": {},
     },
     {
@@ -329,7 +334,7 @@ PROVIDERS = [
 TEACHER_MODELS = [
     {"provider": "OpenRouter", "model": "deepseek/deepseek-chat", "label": "DeepSeek V3 (OpenRouter)"},
     {"provider": "OpenRouter", "model": "google/gemini-2.0-flash-001", "label": "Google Gemini 2.0 Flash (OpenRouter)"},
-    {"provider": "Groq", "model": "llama-3.3-70b-versatile", "label": "Llama 3.3 70B (Groq)"},
+    {"provider": "Groq", "model": GROQ_MODEL, "label": f"{GROQ_MODEL} (Groq)"},
     {"provider": "Mistral", "model": "mistral-small-latest", "label": "Mistral Small (Mistral)"},
 ]
 
@@ -753,6 +758,9 @@ def build_provider_request(p: dict, key: str, payload: dict, stream: bool = Fals
     }
     if payload.get("max_tokens"):
         body["max_tokens"] = payload["max_tokens"]
+        if p["name"] == "Groq" and str(body["model"]).startswith("openai/gpt-oss"):
+            # modelo de raciocínio: parte do limite é gasta a "pensar"; sem folga a resposta pode ficar cortada
+            body["max_tokens"] = int(payload["max_tokens"]) + 2048
     return headers, body
 
 
@@ -946,7 +954,7 @@ def pick_next_topic_and_category() -> tuple[str, str]:
 
 
 async def learn_one_topic(custom_topic: str = "", custom_category: str = "", preferred_provider: str = "") -> dict:
-    """Liga-se a um modelo real (DeepSeek, Gemini, Llama 70B, Mistral), estuda um tópico e atualiza as %."""
+    """Liga-se a um modelo real (DeepSeek, Gemini, GPT-OSS 120B, Mistral), estuda um tópico e atualiza as %."""
     async with CLASSROOM_LOCK:
         idx = int(SERVER_SETTINGS.get("topic_index", 0))
         if custom_topic.strip():
@@ -1917,7 +1925,7 @@ UNIFIED_OFFICE_HTML = """<!DOCTYPE html>
                             <option value="auto">Rotação Automática</option>
                             <option value="DeepSeek">DeepSeek V3 (OpenRouter)</option>
                             <option value="Gemini">Google Gemini (OpenRouter)</option>
-                            <option value="Groq">Llama 3.3 70B (Groq)</option>
+                            <option value="Groq">GPT-OSS 120B (Groq)</option>
                             <option value="Mistral">Mistral Small (Mistral)</option>
                         </select>
                         <select id="learn-category" class="input-box" style="margin:0;"></select>
@@ -1984,7 +1992,7 @@ UNIFIED_OFFICE_HTML = """<!DOCTYPE html>
                 <label style="font-size: 0.78rem; color: var(--text-muted);">Fornecedor:</label>
                 <select id="key-provider" class="input-box">
                     <option value="OpenRouter">OpenRouter (DeepSeek & Gemini)</option>
-                    <option value="Groq">Groq (Llama 3.3 70B Versatile)</option>
+                    <option value="Groq">Groq (GPT-OSS 120B)</option>
                     <option value="Mistral">Mistral AI (Mistral Small Latest)</option>
                 </select>
                 <label style="font-size: 0.78rem; color: var(--text-muted);">Chave API:</label>

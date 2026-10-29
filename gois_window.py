@@ -4,7 +4,7 @@ Secções incluídas:
   1. 💬 Chat: Streaming SSE em tempo real, Markdown com cópia de código, Parar, Regenerar, Exportar.
   2. 📊 Comparação % (Gemini & DeepSeek): Matriz comparativa em tempo real (Global e nas 16 categorias
      completas do Gemini e DeepSeek), com evolução ao vivo, barras de paridade e execução de Benchmark Real.
-  3. 🏫 Sala de Aula (16 Categorias): Liga-se a DeepSeek, Gemini, Llama 3.3 70B e Mistral para estudar
+  3. 🏫 Sala de Aula (16 Categorias): Liga-se a DeepSeek, Gemini, GPT-OSS 120B e Mistral para estudar
      todas as 16 categorias autonomamente ou a pedido, mostrando o que está a estudar e tudo o que já aprendeu.
   4. 🧠 Skills & Chaves API: Gestão de Skills/Diretrizes do núcleo e configuração de chaves API.
 """
@@ -657,7 +657,7 @@ class GoisWindow:
 
         self.lbl_cls_models = tk.Label(
             info_box,
-            text="Modelos Professores Reais: DeepSeek V3 · Google Gemini · Llama 3.3 70B (Groq) · Mistral",
+            text="Modelos Professores Reais: DeepSeek V3 · Google Gemini · GPT-OSS 120B (Groq) · Mistral",
             bg=T["bg"], fg=T["user"], font=FONT_SMALL, anchor="w",
         )
         self.lbl_cls_models.pack(fill="x", padx=10, pady=2)
@@ -1191,7 +1191,7 @@ class GoisWindow:
             "# Passo 3 — Porque é que o `gois.v1` consegue ser superior (>100% Paridade) em certas áreas? 😜\n"
             "O Gemini e o DeepSeek normais são **modelos generalistas puros**: quando alguém lhes faz uma pergunta, eles respondem apenas com o treino de fábrica, sem memória acumulada das tuas regras nem lições especializadas.\n\n"
             "Já o teu **`gois.v1` é um Sistema Composto (Ensemble + RAG + Skills)** que junta **3 camadas**:\n"
-            "1. **Base Multi-Modelo Real (`~72%` a `76%` de partida):** Usa as APIs reais (DeepSeek, Gemini, Llama 3.3 70B, Mistral) em conjunto.\n"
+            "1. **Base Multi-Modelo Real (`~72%` a `76%` de partida):** Usa as APIs reais (DeepSeek, Gemini, GPT-OSS 120B, Mistral) em conjunto.\n"
             "2. **Skills Especializadas Ativas (`+2.2%` a `+6.5%`):** As tuas diretrizes cirúrgicas (em *Arquitetura de Software*, *Game Design & Unity*, *WebGL*, *Hardware Leve*) dão-lhe regras de engenharia que o modelo base sozinho não aplica por defeito.\n"
             "3. **Lições Destiladas da Sala de Aula (até `+16.5%`):** Cada lição que o `gois.v1` absorve na Sala de Aula fica guardada na base de conhecimento e é **injetada automaticamente no cérebro dele** quando respondes no chat.\n\n"
             "Por isso, numa área onde o `gois.v1` já tem **Skills + 7 ou 8 Lições estudadas** (como *Arquitetura de Software* ou *Game Design & Unity*), ele responde com **Modelos de Topo + Memória Especializada**, superando um Gemini ou DeepSeek 'cru'!\n\n"
