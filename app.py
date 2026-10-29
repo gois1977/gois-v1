@@ -5,7 +5,7 @@ import json
 import hmac
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -155,12 +155,132 @@ SERVER_SETTINGS = {
     "teacher_provider": "auto",
     "topic_index": 0,
     "active_categories": list(DEFAULT_CATEGORIES),
+    "daily_token_limit": 0,          # 0 = sem limite diário
+    "auto_paused_by_limit": False,   # True quando a auto-aprendizagem está em pausa por limite
 }
 
 SKILLS_DB: list = []
 KNOWLEDGE_DB: list = []
 BENCHMARK_DB: list = []  # Histórico de testes comparativos reais executados
 RUNTIME_KEYS: dict = {}
+
+# ---------------------------------------------------------------------
+# CONTADOR DE TOKENS & LIMITE DIÁRIO
+# A auto-aprendizagem (Sala de Aula) pára quando o limite diário é atingido
+# e retoma sozinha no dia seguinte. O chat e a aprendizagem manual continuam
+# a funcionar, mas os tokens que gastam contam para o mesmo limite diário.
+# ---------------------------------------------------------------------
+try:
+    from zoneinfo import ZoneInfo
+    TOKEN_TZ_NAME = os.environ.get("TOKEN_TZ", "Europe/London")
+    TOKEN_TZ = ZoneInfo(TOKEN_TZ_NAME)
+except Exception:
+    TOKEN_TZ_NAME = "UTC"
+    TOKEN_TZ = timezone.utc
+
+MAX_DAILY_LIMIT = 1_000_000_000
+
+TOKEN_STATS = {
+    "date": "",
+    "used_today": 0,
+    "chat_today": 0,
+    "classroom_today": 0,
+    "used_total": 0,
+}
+
+
+def token_now() -> datetime:
+    return datetime.now(TOKEN_TZ)
+
+
+def roll_token_day() -> None:
+    today = token_now().strftime("%Y-%m-%d")
+    if TOKEN_STATS["date"] != today:
+        TOKEN_STATS.update({"date": today, "used_today": 0, "chat_today": 0, "classroom_today": 0})
+
+
+def estimate_tokens(text) -> int:
+    return max(1, len(str(text or "")) // 4)
+
+
+def estimate_prompt_tokens(payload: dict) -> int:
+    total = 0
+    for m in (payload.get("messages") or []):
+        if isinstance(m, dict):
+            total += len(str(m.get("content", "")))
+    return max(1, total // 4)
+
+
+def usage_total(usage) -> int:
+    if not isinstance(usage, dict):
+        return 0
+    t = usage.get("total_tokens")
+    if isinstance(t, (int, float)) and t > 0:
+        return int(t)
+    try:
+        return int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+    except Exception:
+        return 0
+
+
+def record_tokens(n, kind: str = "chat") -> None:
+    try:
+        n = int(n)
+    except Exception:
+        return
+    if n <= 0:
+        return
+    roll_token_day()
+    TOKEN_STATS["used_today"] += n
+    TOKEN_STATS["used_total"] += n
+    key = "classroom_today" if kind == "classroom" else "chat_today"
+    TOKEN_STATS[key] += n
+
+
+def account_response_tokens(payload: dict, data: dict, kind: str) -> None:
+    try:
+        n = usage_total(data.get("usage"))
+        if not n:
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            n = estimate_prompt_tokens(payload) + estimate_tokens(text)
+        record_tokens(n, kind)
+    except Exception:
+        pass
+
+
+def daily_limit() -> int:
+    try:
+        return max(0, int(SERVER_SETTINGS.get("daily_token_limit") or 0))
+    except Exception:
+        return 0
+
+
+def limit_reached() -> bool:
+    roll_token_day()
+    lim = daily_limit()
+    return lim > 0 and TOKEN_STATS["used_today"] >= lim
+
+
+def token_status() -> dict:
+    roll_token_day()
+    lim = daily_limit()
+    used = TOKEN_STATS["used_today"]
+    now = token_now()
+    nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return {
+        "date": TOKEN_STATS["date"],
+        "timezone": TOKEN_TZ_NAME,
+        "used_today": used,
+        "chat_today": TOKEN_STATS["chat_today"],
+        "classroom_today": TOKEN_STATS["classroom_today"],
+        "used_total": TOKEN_STATS["used_total"],
+        "daily_limit": lim,
+        "remaining_today": max(0, lim - used) if lim > 0 else None,
+        "limit_reached": lim > 0 and used >= lim,
+        "auto_paused_by_limit": bool(SERVER_SETTINGS.get("auto_paused_by_limit")),
+        "resets_at": "00:00",
+        "seconds_to_reset": int((nxt - now).total_seconds()),
+    }
 
 GOIS_SYSTEM_PROMPT = """És o gois.v1, um assistente avançado de engenharia de software, arquitetura de sistemas, ciência e desenvolvimento de jogos (Unity/C#, Python/FastAPI, WebGL/Three.js, matemática, IA e otimização para hardware leve).
 
@@ -553,7 +673,7 @@ def build_provider_request(p: dict, key: str, payload: dict, stream: bool = Fals
     return headers, body
 
 
-async def make_llm_request(payload: dict, preferred_provider: str = "", override_model: str = ""):
+async def make_llm_request(payload: dict, preferred_provider: str = "", override_model: str = "", usage_kind: str = "chat"):
     """Pedido completo (sem streaming) com failover entre fornecedores."""
     errors = []
     timeout = httpx.Timeout(65.0, connect=15.0)
@@ -574,6 +694,7 @@ async def make_llm_request(payload: dict, preferred_provider: str = "", override
                         if isinstance(data, dict) and data.get("choices"):
                             data["model"] = f"{p['name']} · {model_to_use}"
                             data["provider_name"] = p["name"]
+                            account_response_tokens(payload, data, usage_kind)
                             return data, errors
                         errors.append(f"{p['name']}: resposta 200 sem 'choices'")
                     else:
@@ -587,9 +708,12 @@ async def make_llm_request(payload: dict, preferred_provider: str = "", override
                                 if isinstance(data2, dict) and data2.get("choices"):
                                     data2["model"] = f"{p['name']} · {p['model']}"
                                     data2["provider_name"] = p["name"]
+                                    account_response_tokens(payload, data2, usage_kind)
                                     return data2, errors
                 except Exception as e:
                     errors.append(f"{p['name']}: {type(e).__name__}")
+    if errors:
+        logger.warning("[IA] nenhum fornecedor respondeu: " + " | ".join(errors))
     return None, errors
 
 
@@ -606,6 +730,8 @@ async def stream_llm_request(payload: dict, preferred_provider: str = ""):
                 continue
             for key in keys:
                 got_content = False
+                usage_seen = 0
+                out_chars = 0
                 try:
                     headers, body = build_provider_request(p, key, payload, stream=True)
                     async with client.stream("POST", p["url"], json=body, headers=headers) as resp:
@@ -634,6 +760,10 @@ async def stream_llm_request(payload: dict, preferred_provider: str = ""):
                             if not isinstance(chunk, dict):
                                 continue
 
+                            ut = usage_total(chunk.get("usage") or (chunk.get("x_groq") or {}).get("usage"))
+                            if ut:
+                                usage_seen = ut
+
                             if chunk.get("error"):
                                 err_msg = chunk["error"]
                                 if isinstance(err_msg, dict):
@@ -654,6 +784,7 @@ async def stream_llm_request(payload: dict, preferred_provider: str = ""):
                                 delta = choices[0].get("delta") or {}
                                 if delta.get("content"):
                                     got_content = True
+                                    out_chars += len(str(delta["content"]))
 
                             yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
 
@@ -667,8 +798,12 @@ async def stream_llm_request(payload: dict, preferred_provider: str = ""):
                         yield "data: " + json.dumps({"error": {"message": f"Ligação interrompida ({p['name']})."}}, ensure_ascii=False) + "\n\n"
                         yield "data: [DONE]\n\n"
                         return
+                finally:
+                    if got_content:
+                        record_tokens(usage_seen or (estimate_prompt_tokens(payload) + max(1, out_chars // 4)), "chat")
 
     detail = "Erro de Failover: nenhum fornecedor de IA respondeu com sucesso. " + " | ".join(errors)
+    logger.warning(f"[IA] {detail}")
     yield "data: " + json.dumps({"error": {"message": detail}}, ensure_ascii=False) + "\n\n"
     yield "data: [DONE]\n\n"
 
@@ -785,6 +920,7 @@ async def learn_one_topic(custom_topic: str = "", custom_category: str = "", pre
                 {"messages": prompt_messages, "temperature": 0.5, "max_tokens": 950},
                 preferred_provider=chosen_provider,
                 override_model=override_model,
+                usage_kind="classroom",
             )
             if not data:
                 raise RuntimeError("Nenhum modelo respondeu: " + " | ".join(errors))
@@ -858,7 +994,19 @@ async def classroom_background_worker():
     while True:
         try:
             if SERVER_SETTINGS.get("classroom_mode") and any(key_source(p) for p in PROVIDERS):
-                await learn_one_topic()
+                if limit_reached():
+                    if not SERVER_SETTINGS.get("auto_paused_by_limit"):
+                        SERVER_SETTINGS["auto_paused_by_limit"] = True
+                        SERVER_SETTINGS["current_topic"] = "⏸ Pausa automática: limite diário de tokens atingido"
+                        logger.warning(
+                            f"[TOKENS] Limite diário atingido ({TOKEN_STATS['used_today']}/{daily_limit()}). "
+                            "Auto-aprendizagem em pausa até ao próximo dia."
+                        )
+                else:
+                    if SERVER_SETTINGS.get("auto_paused_by_limit"):
+                        SERVER_SETTINGS["auto_paused_by_limit"] = False
+                        logger.info("[TOKENS] Novo dia ou limite alterado: auto-aprendizagem retomada.")
+                    await learn_one_topic()
         except Exception as e:
             logger.warning(f"[SALA DE AULA] ciclo falhou: {e!r}")
         await asyncio.sleep(55)
@@ -1033,6 +1181,7 @@ def full_status_payload() -> dict:
         "comparison": comp,
         "total_knowledge": len(KNOWLEDGE_DB),
         "total_skills": len(SKILLS_DB),
+        "tokens": token_status(),
         "providers": [
             {
                 "name": p["name"],
@@ -1053,6 +1202,24 @@ def apply_settings(body: dict):
         SERVER_SETTINGS["current_topic"] = str(body["current_topic"])[:300]
     if "teacher_provider" in body:
         SERVER_SETTINGS["teacher_provider"] = str(body["teacher_provider"])[:60]
+    if "daily_token_limit" in body:
+        try:
+            lim = int(float(body["daily_token_limit"]))
+        except Exception:
+            lim = 0
+        SERVER_SETTINGS["daily_token_limit"] = max(0, min(lim, MAX_DAILY_LIMIT))
+        if not limit_reached():
+            SERVER_SETTINGS["auto_paused_by_limit"] = False
+    ur = body.get("usage_restore")
+    if isinstance(ur, dict):
+        roll_token_day()
+        try:
+            if str(ur.get("date")) == TOKEN_STATS["date"]:
+                for k in ("used_today", "chat_today", "classroom_today"):
+                    TOKEN_STATS[k] = max(TOKEN_STATS[k], int(ur.get(k) or 0))
+            TOKEN_STATS["used_total"] = max(TOKEN_STATS["used_total"], int(ur.get("used_total") or 0))
+        except Exception:
+            pass
     if isinstance(body.get("active_categories"), list):
         cats = [normalize_category(str(c)) for c in body["active_categories"] if str(c).strip()]
         seen = []
@@ -1086,6 +1253,11 @@ async def trigger_benchmark(request: Request):
         return {"status": "success", **res}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/tokens")
+async def get_tokens():
+    return token_status()
 
 
 @app.get("/api/settings")
