@@ -166,6 +166,16 @@ async def update_settings(request: Request):
     SERVER_SETTINGS.update(body)
     return {"status": "success", "settings": SERVER_SETTINGS}
 
+@app.post("/api/classroom/toggle")
+async def toggle_classroom(request: Request):
+    global SERVER_SETTINGS
+    body = await request.json()
+    if "classroom_mode" in body:
+        SERVER_SETTINGS["classroom_mode"] = bool(body["classroom_mode"])
+    if "current_topic" in body:
+        SERVER_SETTINGS["current_topic"] = str(body["current_topic"])
+    return {"status": "success", "classroom_mode": SERVER_SETTINGS["classroom_mode"], "current_topic": SERVER_SETTINGS["current_topic"]}
+
 @app.get("/api/knowledge")
 async def get_knowledge():
     return KNOWLEDGE_DB
