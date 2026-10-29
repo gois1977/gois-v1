@@ -164,7 +164,7 @@ def load_settings() -> dict:
             pass
     return {
         "classroom_mode": False,
-        "teacher_model": "deepseek/deepseek-r1:free",
+        "teacher_model": "openrouter/free",
         "active_categories": DEFAULT_CATEGORIES,
         "current_topic": "Em espera...",
     }
@@ -270,7 +270,7 @@ async def pull_state_from_render() -> bool:
         return False
 
 # ---------------------------------------------------------------------------
-# CLIENTE LLM MULTI-PROVIDER COM FAILOVER (CORAÇÃO DO SISTEMA)
+# CLIENTE LLM MULTI-PROVIDER COM FAILOVER
 # ---------------------------------------------------------------------------
 PROVIDER_ENDPOINTS = {
     "openrouter": "https://openrouter.ai/api/v1/chat/completions",
@@ -283,10 +283,9 @@ PROVIDER_ENDPOINTS = {
 
 PROVIDER_MODELS = {
     "openrouter": [
-        "deepseek/deepseek-r1:free",
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "google/gemini-2.0-flash-exp:free",
-        "mistralai/mistral-small-3.2-24b-instruct:free"
+        "openrouter/free",
+        "google/gemma-3-27b-it:free",
+        "meta-llama/llama-3.3-70b-instruct:free"
     ],
     "openai":   ["gpt-4o-mini", "gpt-4o"],
     "deepseek": ["deepseek-chat"],
@@ -442,7 +441,7 @@ async def background_classroom_loop():
             print(f"[SALA] erro a processar lição: {e}")
 
 # ---------------------------------------------------------------------------
-# HTML (A interface que já tinhas)
+# HTML
 # ---------------------------------------------------------------------------
 UNIFIED_OFFICE_HTML = """<!DOCTYPE html>
 <html lang="pt">
