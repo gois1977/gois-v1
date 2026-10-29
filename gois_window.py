@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
@@ -100,7 +101,8 @@ def save_json_file(path: Path, data) -> None:
 
 
 def load_config() -> dict:
-    cfg = {"server": DEFAULT_SERVER, "sync_token": "", "temperature": 0.5, "history": 30}
+    cfg = {"server": DEFAULT_SERVER, "sync_token": "", "temperature": 0.5, "history": 30,
+           "daily_token_limit": 0, "usage_cache": {}}
     legacy = load_json_file(LEGACY_CONFIG_FILE, {})
     if isinstance(legacy, dict):
         cfg.update({k: legacy[k] for k in cfg if k in legacy})
@@ -273,6 +275,43 @@ def make_bar(pct: float, width: int = 16) -> str:
 # INTERFACE GRÁFICA COMPLETA
 # =====================================================================
 
+TOKEN_BAR_W = 130
+
+
+def to_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def fmt_tokens(n) -> str:
+    n = to_int(n, -1)
+    if n < 0:
+        return "—"
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k".replace(".0k", "k")
+    return f"{n / 1_000_000:.2f}M".replace(".00M", "M")
+
+
+def parse_token_amount(text: str) -> int:
+    """'200000', '200k', '1.5m' -> inteiro. Vazio / 0 / 'sem' -> 0 (sem limite). Lança ValueError se inválido."""
+    t = (text or "").strip().lower().replace(" ", "").replace("_", "")
+    if t in ("", "0", "sem", "semlimite", "ilimitado", "off", "-"):
+        return 0
+    mult = 1
+    if t.endswith("k"):
+        mult, t = 1000, t[:-1]
+    elif t.endswith("m"):
+        mult, t = 1_000_000, t[:-1]
+    value = float(t.replace(",", ".")) * mult
+    if value < 0:
+        raise ValueError("negativo")
+    return int(value)
+
+
 class GoisWindow:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -307,6 +346,7 @@ class GoisWindow:
         self.cp_counter = 0
         self.last_user_text = ""
         self.current_tab = "chat"
+        self.limit_push_pending = False
 
         root.title(APP_NAME)
         root.geometry("1140x760")
@@ -404,6 +444,8 @@ class GoisWindow:
         for text, cmd in (("Definições", self.open_settings), ("☁️ Sincronizar", self.sync), ("📱 App goisAI", self.open_user_app)):
             self.make_button(top, text, cmd, kind="blue" if "goisAI" in text else "default", padx=10, pady=4).pack(side="right", padx=3, pady=6)
 
+        tk.Frame(self.root, bg=T["border"], height=1).pack(fill="x")
+        self.build_tokens_bar()
         tk.Frame(self.root, bg=T["border"], height=1).pack(fill="x")
 
         self.views_host = tk.Frame(self.root, bg=T["bg"])
@@ -601,7 +643,7 @@ class GoisWindow:
         ).pack(side="left")
 
         self.btn_toggle_classroom = self.make_button(
-            row1, "Ligar / Desligar Sala de Aula", self.toggle_classroom, kind="primary", padx=12, pady=4
+            row1, "Sala de Aula: a verificar...", self.toggle_classroom, kind="default", padx=12, pady=4
         )
         self.btn_toggle_classroom.pack(side="right", padx=(6, 0))
         self.make_button(row1, "🔄 Atualizar", self.refresh_classroom_from_server, padx=10, pady=4).pack(side="right", padx=4)
@@ -770,6 +812,7 @@ class GoisWindow:
         self.lbl_keys_status = tk.Label(
             right, text="A verificar estado das chaves no servidor...",
             bg=T["bg"], fg=T["fg"], font=FONT_SMALL, justify="left", anchor="w", padx=10, pady=10,
+            wraplength=340,
         )
         self.lbl_keys_status.pack(fill="x", padx=14, pady=6)
 
@@ -787,13 +830,18 @@ class GoisWindow:
 
         self.make_button(
             right, "☁️ Enviar Chave para o Servidor", self.send_api_key_ui, kind="blue"
-        ).pack(fill="x", padx=14, pady=12)
+        ).pack(fill="x", padx=14, pady=(12, 4))
+
+        self.make_button(
+            right, "🗑️ Remover Chave do Fornecedor", self.remove_api_key_ui, kind="danger"
+        ).pack(fill="x", padx=14, pady=(4, 12))
 
         tk.Label(
             right,
             text=(
                 "Nota:\n"
-                "• As tuas chaves no Environment do Render já estão ativas.\n"
+                "• Com a sincronização do Render ligada, enviar ou remover uma chave aqui grava no Environment do Render (permanente).\n"
+                "• Sem ela, a chave fica só em memória no servidor e perde-se ao reiniciar.\n"
                 "• O gois.v1 usa estas chaves tanto para o Chat como para estudar todas as 16 categorias de Gemini & DeepSeek."
             ),
             bg=T["panel"], fg=T["muted"], font=FONT_SMALL, wraplength=340, justify="left", anchor="w",
@@ -997,6 +1045,7 @@ class GoisWindow:
             st = res.get("settings") if isinstance(res.get("settings"), dict) else {}
             kn = res.get("knowledge") if isinstance(res.get("knowledge"), list) else []
             self.server_state.update(st)
+            self.reconcile_tokens(st.get("tokens"))
             self.merge_knowledge(kn)
             self.update_classroom_ui()
             self.update_comparison_ui()
@@ -1243,15 +1292,176 @@ class GoisWindow:
             done,
         )
 
+    # ---------- Tokens: barra no topo, limite diário, botão ligado/desligado ----------
+    def build_tokens_bar(self):
+        T = THEME
+        bg = T["panel_alt"]
+        bar = tk.Frame(self.root, bg=bg)
+        bar.pack(fill="x")
+
+        left = tk.Frame(bar, bg=bg)
+        left.pack(side="left", padx=(12, 6), pady=5)
+        tk.Label(left, text="🔋 Tokens hoje:", bg=bg, fg=T["muted"], font=FONT_SMALL).pack(side="left")
+        self.lbl_tok_main = tk.Label(left, text="a ligar ao servidor...", bg=bg, fg=T["fg"], font=FONT_UI_BOLD)
+        self.lbl_tok_main.pack(side="left", padx=(6, 8))
+        self.tok_canvas = tk.Canvas(left, width=TOKEN_BAR_W, height=10, bg=T["border"], highlightthickness=0, bd=0)
+        self.tok_canvas.pack(side="left", padx=(0, 10))
+        self.lbl_tok_state = tk.Label(left, text="", bg=bg, fg=T["muted"], font=FONT_SMALL)
+        self.lbl_tok_state.pack(side="left")
+
+        right = tk.Frame(bar, bg=bg)
+        right.pack(side="right", padx=(6, 12), pady=4)
+        self.lbl_tok_total = tk.Label(right, text="Total acumulado: —", bg=bg, fg=T["muted"], font=FONT_SMALL)
+        self.lbl_tok_total.pack(side="left", padx=(0, 14))
+        tk.Label(right, text="Limite/dia (0 = sem):", bg=bg, fg=T["muted"], font=FONT_SMALL).pack(side="left")
+        self.ent_limit = tk.Entry(
+            right, width=10, bg=T["bg"], fg=T["fg"], insertbackground=T["fg"], relief="flat", font=FONT_UI,
+            highlightthickness=1, highlightbackground=T["border"], highlightcolor=T["user"],
+        )
+        lim0 = to_int(self.cfg.get("daily_token_limit"), 0)
+        self.ent_limit.insert(0, str(lim0))
+        self.ent_limit.pack(side="left", padx=(4, 4), ipady=2)
+        self.ent_limit.bind("<Return>", lambda e: self.save_daily_limit())
+        self.make_button(right, "Guardar", self.save_daily_limit, kind="blue", padx=8, pady=2).pack(side="left")
+
+    def update_tokens_ui(self):
+        T = THEME
+        tks = self.server_state.get("tokens")
+        if not isinstance(tks, dict) or not tks:
+            return
+        used = to_int(tks.get("used_today"))
+        lim = to_int(tks.get("daily_limit"))
+        total = to_int(tks.get("used_total"))
+        active = bool(self.server_state.get("classroom_mode", True))
+
+        if lim > 0:
+            pct = min(1.0, used / lim)
+            color = T["bot"] if pct < 0.7 else (T["warn"] if pct < 0.9 else T["err"])
+            main = f"{fmt_tokens(used)} / {fmt_tokens(lim)} · restam {fmt_tokens(max(0, lim - used))}"
+            self.lbl_tok_main.config(text=main, fg=color)
+        else:
+            pct, color = 0.0, T["muted"]
+            self.lbl_tok_main.config(text=f"{fmt_tokens(used)} usados · sem limite diário", fg=T["fg"])
+
+        c = self.tok_canvas
+        c.delete("all")
+        if pct > 0:
+            c.create_rectangle(0, 0, max(2, int(TOKEN_BAR_W * pct)), 10, fill=color, width=0)
+
+        paused = active and (bool(tks.get("auto_paused_by_limit")) or bool(tks.get("limit_reached")))
+        if not active:
+            state, sfg = "⏹ Sala de Aula desligada", T["muted"]
+        elif paused:
+            h, m = divmod(to_int(tks.get("seconds_to_reset")) // 60, 60)
+            state, sfg = f"⏸ Pausa até {tks.get('resets_at', '00:00')} (em {h}h {m:02d}m)", T["warn"]
+        else:
+            state, sfg = "▶ Auto-estudo ativo", T["bot"]
+        self.lbl_tok_state.config(text=state, fg=sfg)
+        self.lbl_tok_total.config(text=f"Total acumulado: {fmt_tokens(total)}")
+
+    def apply_toggle_style(self, active: bool, paused_limit: bool):
+        if not active:
+            text, bg, hover = "🔴 Sala de Aula: DESLIGADA", "#da3633", "#f85149"
+        elif paused_limit:
+            text, bg, hover = "⏸ LIGADA · em pausa (limite)", "#9e6a03", "#bb8009"
+        else:
+            text, bg, hover = "🟢 Sala de Aula: LIGADA", THEME["accent"], "#2ea043"
+        b = self.btn_toggle_classroom
+        b.configure(text=text, bg=bg, activebackground=hover)
+        b._base_bg, b._hover_bg = bg, hover
+
+    def save_daily_limit(self):
+        try:
+            lim = parse_token_amount(self.ent_limit.get())
+        except ValueError:
+            messagebox.showerror(
+                "Limite diário",
+                "Escreve um número (ex.: 200000, 200k ou 1.5m). Usa 0 para não ter limite.",
+                parent=self.root,
+            )
+            return
+        self.cfg["daily_token_limit"] = lim
+        save_json_file(CONFIG_FILE, self.cfg)
+        self.ent_limit.delete(0, "end")
+        self.ent_limit.insert(0, str(lim))
+        self.limit_push_pending = True
+        self.set_status("A guardar o limite diário de tokens...")
+
+        def done(res, err):
+            self.limit_push_pending = False
+            if err:
+                self.set_status("Erro ao guardar o limite: " + err, error=True)
+                return
+            if isinstance(res, dict):
+                self.server_state.update(res)
+            self.update_classroom_ui()
+            self.set_status("Limite diário guardado: " + (fmt_tokens(lim) if lim else "sem limite"))
+
+        self.background(
+            lambda: http_json(self.cfg["server"] + "/api/settings", {"daily_token_limit": lim}, self.cfg["sync_token"]),
+            done,
+        )
+
+    def reconcile_tokens(self, tks):
+        """Mantém o servidor alinhado: o Render (plano grátis) perde limite e contadores quando reinicia."""
+        if not isinstance(tks, dict) or not tks:
+            return
+        payload = {}
+
+        if not self.limit_push_pending:
+            local_lim = to_int(self.cfg.get("daily_token_limit"))
+            srv_lim = to_int(tks.get("daily_limit"))
+            if local_lim != srv_lim:
+                if local_lim > 0:
+                    payload["daily_token_limit"] = local_lim
+                else:
+                    self.cfg["daily_token_limit"] = srv_lim
+                    save_json_file(CONFIG_FILE, self.cfg)
+                    self.ent_limit.delete(0, "end")
+                    self.ent_limit.insert(0, str(srv_lim))
+
+        cache = self.cfg.get("usage_cache") if isinstance(self.cfg.get("usage_cache"), dict) else {}
+        date = str(tks.get("date") or "")
+        new = {"date": date}
+        for k in ("used_today", "chat_today", "classroom_today"):
+            srv = to_int(tks.get(k))
+            new[k] = max(srv, to_int(cache.get(k))) if cache.get("date") == date else srv
+        new["used_total"] = max(to_int(tks.get("used_total")), to_int(cache.get("used_total")))
+        if new != cache:
+            self.cfg["usage_cache"] = new
+            save_json_file(CONFIG_FILE, self.cfg)
+        if new["used_today"] > to_int(tks.get("used_today")) or new["used_total"] > to_int(tks.get("used_total")):
+            payload["usage_restore"] = new
+
+        if not payload:
+            return
+
+        def done(res, err):
+            if err:
+                return
+            if isinstance(res, dict):
+                self.server_state.update(res)
+                self.update_classroom_ui()
+
+        self.background(
+            lambda: http_json(self.cfg["server"] + "/api/settings", payload, self.cfg["sync_token"]),
+            done,
+        )
+
     def update_classroom_ui(self):
         T = THEME
         st = self.server_state
         active = bool(st.get("classroom_mode", True))
         learning_now = bool(st.get("learning_now", False))
         providers = st.get("providers_with_key") or []
+        tks = st.get("tokens") if isinstance(st.get("tokens"), dict) else {}
+        paused_limit = active and (bool(tks.get("auto_paused_by_limit")) or bool(tks.get("limit_reached")))
 
         if learning_now:
             mode_str = f"⚡ A APRENDER AGORA COM MODELO REAL ({st.get('current_teacher', 'IA')})..."
+            fg_color = T["warn"]
+        elif paused_limit:
+            mode_str = "⏸ SALA DE AULA EM PAUSA: limite diário de tokens atingido — retoma sozinha à meia-noite"
             fg_color = T["warn"]
         elif active:
             mode_str = "🟢 MODO SALA DE AULA AUTÓNOMA: ATIVO (a estudar todas as 16 categorias de Gemini & DeepSeek)"
@@ -1280,6 +1490,8 @@ class GoisWindow:
             ),
             fg=T["bot"] if active else T["muted"],
         )
+        self.apply_toggle_style(active, paused_limit)
+        self.update_tokens_ui()
 
     def refresh_knowledge_list(self):
         self.lbl_lessons_count.config(text=f"📚 Tudo o que já aprendeu ({len(self.knowledge_items)} lições)")
@@ -1418,7 +1630,11 @@ class GoisWindow:
         def fetch():
             skills = http_json(self.cfg["server"] + "/api/skills", timeout=60)
             keys = http_json(self.cfg["server"] + "/api/keys/status", timeout=60)
-            return {"skills": skills, "keys": keys}
+            try:
+                render = http_json(self.cfg["server"] + "/api/render/status", timeout=30)
+            except Exception:
+                render = None  # servidor antigo, sem sincronização do Render
+            return {"skills": skills, "keys": keys, "render": render}
 
         def done(res, err):
             if err:
@@ -1434,9 +1650,26 @@ class GoisWindow:
             keys = res.get("keys")
             if isinstance(keys, dict):
                 lines = []
+                render = res.get("render")
+                if isinstance(render, dict):
+                    if render.get("enabled"):
+                        lines.append("☁️ Sincronização com o Render: LIGADA")
+                    else:
+                        falta = ", ".join(render.get("missing") or []) or "configuração"
+                        lines.append(f"☁️ Sincronização com o Render: desligada (falta: {falta})")
+                else:
+                    lines.append("☁️ Sincronização com o Render: indisponível (servidor antigo)")
                 for name, info in keys.items():
                     ok = "🟢 Ativa" if info.get("configured") else "🔴 Sem chave"
-                    src = f" ({info.get('source')})" if info.get("source") else ""
+                    src_raw = info.get("source")
+                    if src_raw == "sincronizada":
+                        src = " (só em memória, perde-se ao reiniciar)"
+                    elif src_raw == "environment":
+                        src = " (Environment do Render)"
+                    elif src_raw:
+                        src = f" ({src_raw})"
+                    else:
+                        src = ""
                     mdl = info.get("model", "")
                     lines.append(f"• {name} [{mdl}]:  {ok}{src}")
                 self.lbl_keys_status.config(text="\n".join(lines))
@@ -1495,20 +1728,71 @@ class GoisWindow:
             messagebox.showwarning("Chave API", "Cola uma chave API válida primeiro.")
             return
 
-        def done(_res, err):
+        def done(res, err):
             if err:
                 messagebox.showerror("Chave API", f"Erro ao enviar chave: {err}")
                 return
             self.ent_api_key.delete(0, "end")
             self.refresh_skills_from_server()
             self.refresh_classroom_from_server(silent=True)
-            messagebox.showinfo("Chave API", f"Chave para {provider} ativada no servidor!")
+            res = res if isinstance(res, dict) else {}
+            if res.get("persisted"):
+                messagebox.showinfo(
+                    "Chave API",
+                    f"Chave para {provider} ativada e gravada no Environment do Render (permanente).",
+                )
+            elif res.get("render_enabled"):
+                detalhe = "\n".join(res.get("warnings") or []) or "Não foi possível gravar no Render."
+                messagebox.showwarning(
+                    "Chave API",
+                    f"Chave para {provider} ativada só em memória.\n\n{detalhe}",
+                )
+            else:
+                messagebox.showinfo(
+                    "Chave API",
+                    f"Chave para {provider} ativada no servidor (só em memória; "
+                    "liga a sincronização do Render para a tornar permanente).",
+                )
 
         self.background(
             lambda: http_json(
                 self.cfg["server"] + "/api/keys",
                 {"provider": provider, "key": key},
                 self.cfg["sync_token"],
+            ),
+            done,
+        )
+
+    def remove_api_key_ui(self):
+        provider = self.cmb_key_provider.get().strip()
+        if not provider:
+            return
+        if not messagebox.askyesno(
+            "Remover chave",
+            f"Remover a chave de {provider}?\n\n"
+            "Com a sincronização do Render ligada, a variável também é apagada do Environment do Render.",
+        ):
+            return
+
+        def done(res, err):
+            if err:
+                messagebox.showerror("Remover chave", f"Não foi possível remover: {err}")
+                return
+            self.refresh_skills_from_server()
+            self.refresh_classroom_from_server(silent=True)
+            res = res if isinstance(res, dict) else {}
+            avisos = "\n".join(res.get("warnings") or [])
+            if avisos:
+                messagebox.showwarning("Remover chave", f"Chave de {provider} removida com avisos:\n\n{avisos}")
+            else:
+                messagebox.showinfo("Remover chave", f"Chave de {provider} removida.")
+
+        self.background(
+            lambda: http_json(
+                f"{self.cfg['server']}/api/keys/{urllib.parse.quote(provider)}",
+                None,
+                self.cfg["sync_token"],
+                method="DELETE",
             ),
             done,
         )
@@ -1552,6 +1836,8 @@ class GoisWindow:
                 f"Sincronizado com sucesso: {imp.get('skills', 0)} skills, "
                 f"{imp.get('knowledge', 0)} lições, chaves: {keys}."
             )
+            for w in (res.get("warnings") or []):
+                self.write_sys(str(w))
             self.refresh_classroom_from_server(silent=True)
 
         self.background(
@@ -1668,6 +1954,7 @@ class GoisWindow:
             return
         self.streaming = False
         self.cancel.set()
+        self.root.after(1800, lambda: self.refresh_classroom_from_server(silent=True))
         text = "".join(self.reply_buf).strip()
         if not text and not stopped and not error:
             error = "O modelo devolveu uma resposta vazia."

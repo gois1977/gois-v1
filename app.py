@@ -20,6 +20,13 @@ BASE_DIR = Path(__file__).resolve().parent
 SKILLS_SEED_FILE = Path(os.environ.get("SKILLS_FILE", str(BASE_DIR / "gois_skills_db.json")))
 SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "").strip()
 
+# --- Sincronização das chaves com o Render (Environment) ---
+# RENDER_SERVICE_ID é definida automaticamente pelo Render em cada serviço.
+# RENDER_API_KEY tens de a criar tu (Account Settings > API Keys) e pô-la no Environment.
+RENDER_API_KEY = os.environ.get("RENDER_API_KEY", "").strip()
+RENDER_SERVICE_ID = (os.environ.get("GOIS_RENDER_SERVICE_ID", "") or os.environ.get("RENDER_SERVICE_ID", "")).strip()
+RENDER_API_BASE = os.environ.get("RENDER_API_BASE", "https://api.render.com/v1").strip().rstrip("/")
+
 MAX_KNOWLEDGE = 400
 MAX_CONTENT_CHARS = 6000
 
@@ -364,6 +371,69 @@ def key_source(provider: dict):
     return None
 
 
+def find_provider(name: str):
+    n = (name or "").strip().lower()
+    for p in PROVIDERS:
+        if n in (p["name"].lower(), p["env"].lower()):
+            return p
+    return None
+
+
+def render_sync_state() -> dict:
+    """Estado da sincronização com o Render. Nunca expõe valores secretos."""
+    missing = []
+    if not RENDER_API_KEY:
+        missing.append("RENDER_API_KEY")
+    if not RENDER_SERVICE_ID:
+        missing.append("RENDER_SERVICE_ID")
+    if not SYNC_TOKEN:
+        missing.append("SYNC_TOKEN")
+    return {"enabled": not missing, "missing": missing}
+
+
+def render_sync_enabled() -> bool:
+    return render_sync_state()["enabled"]
+
+
+async def render_request(method: str, env: str, value: str = ""):
+    """PUT (criar/atualizar) ou DELETE de UMA variável do serviço no Render.
+
+    Só mexe numa variável de cada vez e só em nomes da lista de fornecedores.
+    Nunca usa a chamada que substitui todas as variáveis. Não regista valores.
+    Devolve (ok, mensagem).
+    """
+    if env not in {p["env"] for p in PROVIDERS}:
+        return False, "Nome de variável não permitido."
+    url = f"{RENDER_API_BASE}/services/{RENDER_SERVICE_ID}/env-vars/{env}"
+    headers = {
+        "Authorization": f"Bearer {RENDER_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            if method == "PUT":
+                r = await client.put(url, headers=headers, json={"value": value})
+            else:
+                r = await client.delete(url, headers=headers)
+    except Exception as e:
+        return False, f"Sem ligação à API do Render ({type(e).__name__})."
+    code = r.status_code
+    if code in (200, 201, 204):
+        return True, "ok"
+    if code == 404 and method == "DELETE":
+        return True, "já não existia no Render"
+    if code == 401:
+        return False, "O Render recusou a RENDER_API_KEY (401). Cria uma nova em Account Settings > API Keys."
+    if code == 403:
+        return False, "A RENDER_API_KEY não tem permissão neste serviço (403)."
+    if code == 404:
+        return False, "Serviço não encontrado no Render (404). Confirma RENDER_SERVICE_ID e a conta da API Key."
+    if code == 429:
+        return False, "Limite de pedidos do Render atingido (429). Tenta daqui a pouco."
+    return False, f"O Render respondeu HTTP {code}."
+
+
 def ordered_providers(preferred: str = ""):
     pref = (preferred or "").strip().lower()
     if not pref or pref == "auto":
@@ -386,6 +456,19 @@ def check_token(request: Request):
         supplied = auth[7:].strip()
     if not hmac.compare_digest(supplied.encode("utf-8"), SYNC_TOKEN.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Token em falta ou inválido.")
+
+
+def check_token_for_keys(request: Request):
+    """Como check_token, mas se a RENDER_API_KEY existir recusa sempre sem SYNC_TOKEN.
+
+    Evita que alguém que conheça o URL consiga mexer nas chaves do teu Render.
+    """
+    if RENDER_API_KEY and not SYNC_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Define SYNC_TOKEN no Environment do Render (e nas Definições da app) para gerir chaves.",
+        )
+    check_token(request)
 
 
 async def read_json(request: Request):
@@ -1023,6 +1106,11 @@ async def lifespan(_: FastAPI):
             logger.info(f"[CHAVES] {p['name']}: {p['env']} encontrada")
         else:
             logger.warning(f"[CHAVES] {p['name']}: {p['env']} NÃO definida no Environment do Render")
+    _rs = render_sync_state()
+    if _rs["enabled"]:
+        logger.info("[RENDER] Sincronização de chaves LIGADA (as chaves da app gravam no Environment do Render)")
+    else:
+        logger.info(f"[RENDER] Sincronização de chaves DESLIGADA (falta: {', '.join(_rs['missing'])})")
     load_seed_skills()
     task = asyncio.create_task(classroom_background_worker())
     try:
@@ -1397,25 +1485,92 @@ async def keys_status():
         p["name"]: {
             "configured": key_source(p) is not None,
             "source": key_source(p),
+            # persistente = vem do Environment do Render (sobrevive a reinícios)
+            "persistent": key_source(p) == "environment",
             "model": p["model"],
         }
         for p in PROVIDERS
     }
 
 
+@app.get("/api/render/status")
+async def render_status():
+    return render_sync_state()
+
+
 @app.post("/api/keys")
 async def set_runtime_key(request: Request):
-    check_token(request)
+    check_token_for_keys(request)
     body = await read_json(request)
     found = extract_keys(body)
     if not found:
         raise HTTPException(status_code=400, detail="Nenhuma chave válida reconhecida para OpenRouter, Groq ou Mistral.")
+
+    state = render_sync_state()
+    names = {p["env"]: p["name"] for p in PROVIDERS}
+    render_results = {}
+    warnings = []
     for env, val in found.items():
-        RUNTIME_KEYS[env] = val
+        name = names[env]
+        if state["enabled"]:
+            ok, msg = await render_request("PUT", env, val)
+            render_results[name] = {"synced": ok, "detail": msg}
+            if ok:
+                # O Environment passa a ser a fonte única: fica ativa já, sem reiniciar.
+                os.environ[env] = val
+                RUNTIME_KEYS.pop(env, None)
+            else:
+                # Não foi gravada no Render: fica só em memória (perde-se ao reiniciar).
+                RUNTIME_KEYS[env] = val
+                warnings.append(f"{name}: ativa só em memória, não gravada no Render. {msg}")
+        else:
+            RUNTIME_KEYS[env] = val
+            render_results[name] = {"synced": False, "detail": "Sincronização com o Render desligada (falta: " + ", ".join(state["missing"]) + ")."}
+
+    persisted = bool(render_results) and all(r["synced"] for r in render_results.values())
     return {
         "status": "success",
         "updated": [p["name"] for p in PROVIDERS if p["env"] in found],
         "providers_with_key": [p["name"] for p in PROVIDERS if key_source(p)],
+        "render_enabled": state["enabled"],
+        "persisted": persisted,
+        "render": render_results,
+        "warnings": warnings,
+    }
+
+
+@app.delete("/api/keys/{provider}")
+async def delete_runtime_key(provider: str, request: Request):
+    check_token_for_keys(request)
+    p = find_provider(provider)
+    if not p:
+        raise HTTPException(status_code=404, detail="Fornecedor desconhecido. Usa OpenRouter, Groq ou Mistral.")
+    env = p["env"]
+    state = render_sync_state()
+    RUNTIME_KEYS.pop(env, None)
+    render_info = {"synced": False, "detail": ""}
+    warnings = []
+    if state["enabled"]:
+        ok, msg = await render_request("DELETE", env)
+        render_info = {"synced": ok, "detail": msg}
+        if ok:
+            os.environ.pop(env, None)
+        else:
+            warnings.append(f"{p['name']}: não foi apagada do Render. {msg}")
+    else:
+        render_info["detail"] = "Sincronização com o Render desligada (falta: " + ", ".join(state["missing"]) + ")."
+        if os.environ.get(env, "").strip():
+            warnings.append(
+                f"{p['name']}: a chave do Environment do Render mantém-se. "
+                "Liga a sincronização para a poder apagar a partir da app."
+            )
+    return {
+        "status": "success",
+        "provider": p["name"],
+        "still_configured": key_source(p) is not None,
+        "render_enabled": state["enabled"],
+        "render": {p["name"]: render_info},
+        "warnings": warnings,
     }
 
 
@@ -1437,15 +1592,20 @@ async def sync_import(request: Request):
     imported = {"keys": [], "skills": 0, "knowledge": 0, "settings": False}
 
     found = {}
-    for field in KEY_CONTAINERS:
-        if field in payload:
-            got = extract_keys(payload[field])
-            if not got:
-                warnings.append(f"Campo '{field}' recebido, mas nenhuma chave reconhecida.")
-            found.update(got)
-    found.update(extract_keys({k: v for k, v in payload.items() if isinstance(v, str)}))
-    for env, value in found.items():
-        RUNTIME_KEYS[env] = value
+    if render_sync_enabled():
+        # O Environment do Render é a única fonte das chaves: o Sincronizar não lhes toca.
+        if any(field in payload for field in KEY_CONTAINERS):
+            warnings.append("Chaves ignoradas: com a sincronização do Render ligada, gere-as no separador Skills & Chaves API.")
+    else:
+        for field in KEY_CONTAINERS:
+            if field in payload:
+                got = extract_keys(payload[field])
+                if not got:
+                    warnings.append(f"Campo '{field}' recebido, mas nenhuma chave reconhecida.")
+                found.update(got)
+        found.update(extract_keys({k: v for k, v in payload.items() if isinstance(v, str)}))
+        for env, value in found.items():
+            RUNTIME_KEYS[env] = value
     imported["keys"] = sorted(p["name"] for p in PROVIDERS if p["env"] in found)
 
     skills_raw = payload.get("skills", payload.get("skills_db"))
@@ -1504,6 +1664,7 @@ async def health_check():
         "knowledge": len(KNOWLEDGE_DB),
         "overall_comparison": comp["overall"],
         "providers_with_key": [p["name"] for p in PROVIDERS if key_source(p)],
+        "render_key_sync": render_sync_enabled(),
     }
 
 
