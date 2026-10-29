@@ -152,7 +152,7 @@ async def process_chat(request: Request):
 
     raise HTTPException(
         status_code=502,
-        detail="Erro de Failover: Nenhum dos fornecedores de IA (OpenRouter, Groq, Mistral) respondeu com sucesso.",
+        detail="Erro de Failover: Nenhum dos fornecedores de IA respondeu com sucesso.",
     )
 
 @app.get("/api/settings")
@@ -160,21 +160,22 @@ async def get_settings():
     return SERVER_SETTINGS
 
 @app.post("/api/settings")
+@app.post("/api/classroom/toggle")
+@app.post("/api/settings/classroom")
 async def update_settings(request: Request):
     global SERVER_SETTINGS
-    body = await request.json()
-    SERVER_SETTINGS.update(body)
-    return {"status": "success", "settings": SERVER_SETTINGS}
-
-@app.post("/api/classroom/toggle")
-async def toggle_classroom(request: Request):
-    global SERVER_SETTINGS
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+        
     if "classroom_mode" in body:
         SERVER_SETTINGS["classroom_mode"] = bool(body["classroom_mode"])
     if "current_topic" in body:
         SERVER_SETTINGS["current_topic"] = str(body["current_topic"])
-    return {"status": "success", "classroom_mode": SERVER_SETTINGS["classroom_mode"], "current_topic": SERVER_SETTINGS["current_topic"]}
+    SERVER_SETTINGS.update(body)
+    
+    return {"status": "success", "settings": SERVER_SETTINGS, "classroom_mode": SERVER_SETTINGS["classroom_mode"], "current_topic": SERVER_SETTINGS["current_topic"]}
 
 @app.get("/api/knowledge")
 async def get_knowledge():
