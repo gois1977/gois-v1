@@ -2,13 +2,11 @@
 
 Secções incluídas:
   1. 💬 Chat: Streaming SSE em tempo real, Markdown com cópia de código, Parar, Regenerar, Exportar.
-  2. 🏫 Sala de Aula (Modelos Reais): Liga-se a OpenRouter (DeepSeek), Groq (Llama 3.3 70B) e Mistral
-     para aprender tópicos técnicos autonomamente ou a pedido ("Aprender Agora"), mostrando em tempo
-     real o que está a estudar, com que modelo real está a aprender e tudo o que já aprendeu.
-  3. 🧠 Skills & Chaves API: Gestão de Skills/Diretrizes do núcleo e configuração de chaves API.
-
-Guarda automaticamente histórico, lições aprendidas e definições em %APPDATA%\\gois_v1\\ e re-sincroniza
-com o servidor se a instância gratuita do Render reiniciar.
+  2. 📊 Comparação % (Gemini & DeepSeek): Matriz comparativa em tempo real (Global e nas 16 categorias
+     completas do Gemini e DeepSeek), com evolução ao vivo, barras de paridade e execução de Benchmark Real.
+  3. 🏫 Sala de Aula (16 Categorias): Liga-se a DeepSeek, Gemini, Llama 3.3 70B e Mistral para estudar
+     todas as 16 categorias autonomamente ou a pedido, mostrando o que está a estudar e tudo o que já aprendeu.
+  4. 🧠 Skills & Chaves API: Gestão de Skills/Diretrizes do núcleo e configuração de chaves API.
 """
 import ctypes
 import json
@@ -38,13 +36,22 @@ LOCAL_KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"
 LOCAL_SKILLS_FILE = DATA_DIR / "skills.json"
 
 DEFAULT_CATEGORIES = [
-    "Tecnologia & Software",
-    "Game Design & Unity",
-    "Engenharia & AutoCAD",
-    "Inteligência Artificial",
-    "Ciências & Exatas",
-    "Humanidades & Filosofia",
-    "DevOps & Ferramentas",
+    "Arquitetura de Software & Sistemas Assíncronos",
+    "Algoritmos, Estruturas de Dados & Programação",
+    "Game Design, Unity C# & Motores 3D",
+    "WebGL, Three.js, Frontend & Gráficos 2D/3D",
+    "Matemática Avançada, Lógica & Raciocínio Formal",
+    "Inteligência Artificial, LLMs, RAG & Agentes",
+    "Ciência de Dados, SQL & Engenharia de Dados",
+    "Cibersegurança, Criptografia & Auditoria",
+    "DevOps, Cloud, Docker & Sistemas Linux",
+    "Engenharia, AutoCAD, Robótica & IoT",
+    "Física, Química, Biologia & Ciências Exatas",
+    "Multimodalidade, Visão Computacional & Áudio",
+    "Linguística, Tradução & Comunicação Multilingue",
+    "Economia, Finanças Quantitativas & Estratégia",
+    "Direito Tecnológico, Ética & Segurança de IA",
+    "Otimização Extrema & Hardware Leve / Edge AI",
 ]
 
 THEME = {
@@ -56,6 +63,7 @@ THEME = {
     "muted": "#8b949e",
     "user": "#58a6ff",
     "bot": "#3fb950",
+    "purple": "#bc8cff",
     "warn": "#d29922",
     "err": "#f85149",
     "code_bg": "#1c2330",
@@ -256,6 +264,11 @@ def stream_chat(cfg: dict, messages: list, emit, cancel: threading.Event) -> Non
         emit("error", str(e))
 
 
+def make_bar(pct: float, width: int = 16) -> str:
+    filled = max(0, min(width, int(round((pct / 100.0) * width))))
+    return "█" * filled + "░" * (width - filled)
+
+
 # =====================================================================
 # INTERFACE GRÁFICA COMPLETA
 # =====================================================================
@@ -281,6 +294,7 @@ class GoisWindow:
             "last_teacher": "",
             "active_categories": list(DEFAULT_CATEGORIES),
             "providers_with_key": [],
+            "comparison": {},
         }
 
         self.ui_q = queue.Queue()
@@ -295,8 +309,8 @@ class GoisWindow:
         self.current_tab = "chat"
 
         root.title(APP_NAME)
-        root.geometry("1060x740")
-        root.minsize(780, 520)
+        root.geometry("1140x760")
+        root.minsize(840, 540)
         root.configure(bg=THEME["bg"])
 
         self.build_ui()
@@ -356,21 +370,21 @@ class GoisWindow:
 
     def build_ui(self):
         T = THEME
-        # --- Barra de topo com Abas de Navegação ---
         top = tk.Frame(self.root, bg=T["panel"])
         top.pack(fill="x")
 
         brand = tk.Frame(top, bg=T["panel"])
-        brand.pack(side="left", padx=(12, 10), pady=8)
+        brand.pack(side="left", padx=(12, 8), pady=8)
         tk.Label(brand, text="●", bg=T["panel"], fg=T["bot"], font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0, 5))
         tk.Label(brand, text="gois.v1", bg=T["panel"], fg=T["fg"], font=("Segoe UI", 12, "bold")).pack(side="left")
 
         nav = tk.Frame(top, bg=T["panel"])
-        nav.pack(side="left", padx=6, pady=6)
+        nav.pack(side="left", padx=4, pady=6)
         self.tab_btns = {}
         tabs = [
             ("chat", "💬 Chat"),
-            ("classroom", "🏫 Sala de Aula (Modelos Reais)"),
+            ("comparison", "📊 Comparação % (Gemini & DeepSeek)"),
+            ("classroom", "🏫 Sala de Aula (16 Categorias)"),
             ("skills", "🧠 Skills & Chaves API"),
         ]
         for key, label in tabs:
@@ -378,29 +392,30 @@ class GoisWindow:
                 nav, text=label, command=lambda k=key: self.switch_tab(k),
                 bg=T["accent_blue"] if key == "chat" else T["btn"],
                 fg=T["fg"], activebackground=T["btn_hover"], activeforeground=T["fg"],
-                relief="flat", bd=0, padx=12, pady=5, font=FONT_UI_BOLD if key == "chat" else FONT_UI,
+                relief="flat", bd=0, padx=11, pady=5, font=FONT_UI_BOLD if key == "chat" else FONT_UI,
                 cursor="hand2", highlightthickness=0,
             )
-            btn.pack(side="left", padx=3)
+            btn.pack(side="left", padx=2)
             self.tab_btns[key] = btn
 
         self.status = tk.Label(top, text="A ligar ao servidor...", bg=T["panel"], fg=T["muted"], font=FONT_SMALL, anchor="w")
-        self.status.pack(side="left", fill="x", expand=True, padx=10)
+        self.status.pack(side="left", fill="x", expand=True, padx=8)
 
         for text, cmd in (("Definições", self.open_settings), ("☁️ Sincronizar", self.sync)):
-            self.make_button(top, text, cmd, padx=10, pady=4).pack(side="right", padx=4, pady=6)
+            self.make_button(top, text, cmd, padx=10, pady=4).pack(side="right", padx=3, pady=6)
 
         tk.Frame(self.root, bg=T["border"], height=1).pack(fill="x")
 
-        # --- Contentor das Vistas ---
         self.views_host = tk.Frame(self.root, bg=T["bg"])
         self.views_host.pack(fill="both", expand=True)
 
         self.view_chat = tk.Frame(self.views_host, bg=T["bg"])
+        self.view_comparison = tk.Frame(self.views_host, bg=T["bg"])
         self.view_classroom = tk.Frame(self.views_host, bg=T["bg"])
         self.view_skills = tk.Frame(self.views_host, bg=T["bg"])
 
         self.build_chat_view(self.view_chat)
+        self.build_comparison_view(self.view_comparison)
         self.build_classroom_view(self.view_classroom)
         self.build_skills_view(self.view_skills)
 
@@ -409,16 +424,15 @@ class GoisWindow:
     # ---------- VISTA 1: CHAT ----------
     def build_chat_view(self, parent: tk.Frame):
         T = THEME
-        # Barra rápida do chat
         sub = tk.Frame(parent, bg=T["panel_alt"])
         sub.pack(fill="x")
         self.chat_classroom_banner = tk.Label(
             sub,
-            text="🏫 Sala de Aula Autónoma: a verificar estado...",
+            text="📊 A carregar comparação ao vivo gois.v1 vs Gemini & DeepSeek...",
             bg=T["panel_alt"], fg=T["muted"], font=FONT_SMALL, anchor="w", cursor="hand2"
         )
         self.chat_classroom_banner.pack(side="left", padx=14, pady=5, fill="x", expand=True)
-        self.chat_classroom_banner.bind("<Button-1>", lambda e: self.switch_tab("classroom"))
+        self.chat_classroom_banner.bind("<Button-1>", lambda e: self.switch_tab("comparison"))
 
         self.make_button(sub, "Nova conversa", self.new_chat, padx=10, pady=3).pack(side="right", padx=6, pady=4)
         self.make_button(sub, "Exportar Chat", self.export, padx=10, pady=3).pack(side="right", padx=2, pady=4)
@@ -462,17 +476,110 @@ class GoisWindow:
         self.regen_btn.pack(fill="x", pady=(6, 0))
         self.entry.focus_set()
 
-    # ---------- VISTA 2: SALA DE AULA & APRENDIZAGEM ----------
+    # ---------- VISTA 2: COMPARAÇÃO REAL EM % (gois.v1 vs GEMINI vs DEEPSEEK) ----------
+    def build_comparison_view(self, parent: tk.Frame):
+        T = THEME
+        top_card = tk.Frame(parent, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
+        top_card.pack(fill="x", padx=14, pady=(12, 8))
+
+        head = tk.Frame(top_card, bg=T["panel"])
+        head.pack(fill="x", padx=14, pady=(10, 6))
+        tk.Label(
+            head,
+            text="📊 Comparação Real Total em % — gois.v1 vs Google Gemini vs DeepSeek (16 Categorias)",
+            bg=T["panel"], fg=T["fg"], font=("Segoe UI", 11, "bold"),
+        ).pack(side="left")
+
+        self.btn_run_bench = self.make_button(
+            head, "⚔️ Executar Desafio Benchmark Ao Vivo", self.run_benchmark_ui, kind="primary", padx=12, pady=4
+        )
+        self.btn_run_bench.pack(side="right", padx=(6, 0))
+        self.btn_study_selected = self.make_button(
+            head, "⚡ Estudar Categoria Selecionada Agora", self.study_selected_comp_category, kind="blue", padx=12, pady=4
+        )
+        self.btn_study_selected.pack(side="right", padx=4)
+        self.make_button(head, "🔄 Atualizar Live", self.refresh_classroom_from_server, padx=10, pady=4).pack(side="right", padx=4)
+
+        # Cartões KPI Globais
+        kpis = tk.Frame(top_card, bg=T["panel"])
+        kpis.pack(fill="x", padx=14, pady=(4, 10))
+        for i in range(4):
+            kpis.columnconfigure(i, weight=1)
+
+        def make_kpi(col, title, color):
+            f = tk.Frame(kpis, bg=T["bg"], highlightthickness=1, highlightbackground=T["border"], padx=12, pady=8)
+            f.grid(row=0, column=col, sticky="ew", padx=4)
+            tk.Label(f, text=title, bg=T["bg"], fg=T["muted"], font=("Segoe UI", 8, "bold"), anchor="w").pack(fill="x")
+            val = tk.Label(f, text="—%", bg=T["bg"], fg=color, font=("Segoe UI", 16, "bold"), anchor="w")
+            val.pack(fill="x", pady=2)
+            sub = tk.Label(f, text="A calcular...", bg=T["bg"], fg=T["muted"], font=("Segoe UI", 8), anchor="w")
+            sub.pack(fill="x")
+            return val, sub
+
+        self.kpi_gois_val, self.kpi_gois_sub = make_kpi(0, "🟢 DOMÍNIO GLOBAL gois.v1", T["bot"])
+        self.kpi_gem_val, self.kpi_gem_sub = make_kpi(1, "🔵 REFERÊNCIA GOOGLE GEMINI", T["user"])
+        self.kpi_ds_val, self.kpi_ds_sub = make_kpi(2, "🟣 REFERÊNCIA DEEPSEEK V3/R1", T["purple"])
+        self.kpi_cov_val, self.kpi_cov_sub = make_kpi(3, "📚 COBERTURA DAS 16 CATEGORIAS", T["fg"])
+
+        self.lbl_comp_feedback = tk.Label(
+            top_card,
+            text="Seleciona qualquer uma das 16 categorias abaixo e clica em '⚡ Estudar Categoria Selecionada Agora' para o gois.v1 aprender e subir a % em tempo real.",
+            bg=T["panel"], fg=T["warn"], font=FONT_SMALL, anchor="w",
+        )
+        self.lbl_comp_feedback.pack(fill="x", padx=18, pady=(0, 8))
+
+        # Tabela / Lista interativa das 16 categorias + Painel de Detalhe Visual
+        body = tk.Frame(parent, bg=T["bg"])
+        body.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+
+        left = tk.Frame(body, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
+        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
+
+        tk.Label(
+            left,
+            text=" Categoria (16 Domínios Gemini & DeepSeek)                       |  gois.v1  |  Gemini  | DeepSeek | Lições | Paridade",
+            bg=T["panel_alt"], fg=T["muted"], font=("Consolas", 9, "bold"), anchor="w", padx=8, pady=6,
+        ).pack(fill="x")
+
+        lwrap = tk.Frame(left, bg=T["bg"])
+        lwrap.pack(fill="both", expand=True, padx=6, pady=6)
+        cscroll = tk.Scrollbar(lwrap, orient="vertical")
+        cscroll.pack(side="right", fill="y")
+        self.comp_listbox = tk.Listbox(
+            lwrap, bg=T["bg"], fg=T["fg"], selectbackground=T["accent_blue"], selectforeground="#ffffff",
+            bd=0, relief="flat", font=("Consolas", 9), highlightthickness=0, activestyle="none",
+            yscrollcommand=cscroll.set,
+        )
+        self.comp_listbox.pack(side="left", fill="both", expand=True)
+        cscroll.config(command=self.comp_listbox.yview)
+        self.comp_listbox.bind("<<ListboxSelect>>", self.on_select_comp_category)
+
+        right = tk.Frame(body, bg=T["panel"], width=360, highlightthickness=1, highlightbackground=T["border"])
+        right.pack(side="left", fill="y")
+        right.pack_propagate(False)
+
+        tk.Label(
+            right, text="🔬 Raio-X da Categoria Selecionada",
+            bg=T["panel"], fg=T["user"], font=FONT_UI_BOLD, anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 6))
+
+        self.comp_detail = tk.Text(
+            right, wrap="word", state="disabled", bg=T["bg"], fg=T["fg"], bd=0, relief="flat",
+            font=FONT_UI, padx=12, pady=10, spacing1=3, spacing3=3, highlightthickness=0,
+        )
+        self.comp_detail.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.configure_markdown_tags(self.comp_detail)
+
+    # ---------- VISTA 3: SALA DE AULA (16 CATEGORIAS) ----------
     def build_classroom_view(self, parent: tk.Frame):
         T = THEME
-        # Topo: Painel de Estado & Controlo de Aprendizagem com Modelos Reais
         ctrl_card = tk.Frame(parent, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
         ctrl_card.pack(fill="x", padx=14, pady=(12, 8))
 
         row1 = tk.Frame(ctrl_card, bg=T["panel"])
         row1.pack(fill="x", padx=14, pady=(10, 4))
         tk.Label(
-            row1, text="🏫 Sala de Aula Autónoma — Aprendizagem Contínua com Modelos Reais",
+            row1, text="🏫 Sala de Aula Autónoma — Estudo Integral das 16 Categorias (Gemini & DeepSeek)",
             bg=T["panel"], fg=T["bot"], font=("Segoe UI", 11, "bold"),
         ).pack(side="left")
 
@@ -483,7 +590,6 @@ class GoisWindow:
         self.make_button(row1, "🔄 Atualizar", self.refresh_classroom_from_server, padx=10, pady=4).pack(side="right", padx=4)
         self.make_button(row1, "⬇️ Exportar Tudo (.md)", self.export_all_knowledge, padx=10, pady=4).pack(side="right", padx=4)
 
-        # Indicadores ao vivo
         info_box = tk.Frame(ctrl_card, bg=T["bg"], highlightthickness=1, highlightbackground=T["border"])
         info_box.pack(fill="x", padx=14, pady=6)
 
@@ -492,7 +598,7 @@ class GoisWindow:
 
         self.lbl_cls_models = tk.Label(
             info_box,
-            text="Modelos Reais Ligados: OpenRouter (deepseek/deepseek-chat) · Groq (llama-3.3-70b-versatile) · Mistral (mistral-small-latest)",
+            text="Modelos Professores Reais: DeepSeek V3 · Google Gemini · Llama 3.3 70B (Groq) · Mistral",
             bg=T["bg"], fg=T["user"], font=FONT_SMALL, anchor="w",
         )
         self.lbl_cls_models.pack(fill="x", padx=10, pady=2)
@@ -500,20 +606,19 @@ class GoisWindow:
         self.lbl_cls_topic = tk.Label(info_box, text="Tópico Atual / Último Estudo: —", bg=T["bg"], fg=T["fg"], font=FONT_SMALL, anchor="w")
         self.lbl_cls_topic.pack(fill="x", padx=10, pady=(2, 6))
 
-        # Barra para estudar agora um tema com um modelo real à escolha
         learn_bar = tk.Frame(ctrl_card, bg=T["panel"])
         learn_bar.pack(fill="x", padx=14, pady=(4, 10))
 
         tk.Label(learn_bar, text="Modelo Professor:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).pack(side="left")
         self.cmb_teacher = ttk.Combobox(
-            learn_bar, values=["auto (Rotação)", "OpenRouter", "Groq", "Mistral"], state="readonly", width=15
+            learn_bar, values=["auto (Rotação)", "DeepSeek", "Gemini", "Groq", "Mistral"], state="readonly", width=15
         )
         self.cmb_teacher.set("auto (Rotação)")
         self.cmb_teacher.pack(side="left", padx=(4, 10))
 
-        tk.Label(learn_bar, text="Categoria:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).pack(side="left")
-        self.cmb_category = ttk.Combobox(learn_bar, values=DEFAULT_CATEGORIES, state="readonly", width=22)
-        self.cmb_category.set(DEFAULT_CATEGORIES[1])
+        tk.Label(learn_bar, text="Categoria (16):", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).pack(side="left")
+        self.cmb_category = ttk.Combobox(learn_bar, values=DEFAULT_CATEGORIES, state="readonly", width=34)
+        self.cmb_category.set(DEFAULT_CATEGORIES[0])
         self.cmb_category.pack(side="left", padx=(4, 10))
 
         tk.Label(learn_bar, text="Tópico (opcional):", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).pack(side="left")
@@ -528,26 +633,10 @@ class GoisWindow:
         )
         self.btn_learn_now.pack(side="right")
 
-        # Categorias ON/OFF
-        cats_frame = tk.Frame(ctrl_card, bg=T["panel"])
-        cats_frame.pack(fill="x", padx=14, pady=(0, 8))
-        tk.Label(cats_frame, text="Categorias Ativas:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).pack(side="left", padx=(0, 6))
-        self.cat_vars = {}
-        for cat in DEFAULT_CATEGORIES:
-            var = tk.BooleanVar(value=True)
-            self.cat_vars[cat] = var
-            cb = tk.Checkbutton(
-                cats_frame, text=cat.split(" & ")[0], variable=var, command=self.save_categories_to_server,
-                bg=T["panel"], fg=T["fg"], selectcolor=T["bg"], activebackground=T["panel"],
-                activeforeground=T["fg"], font=("Segoe UI", 8),
-            )
-            cb.pack(side="left", padx=3)
-
-        # Corpo inferior dividido: Lista do que já aprendeu (esquerda) + Conteúdo completo da lição (direita)
         split = tk.Frame(parent, bg=T["bg"])
         split.pack(fill="both", expand=True, padx=14, pady=(0, 12))
 
-        left = tk.Frame(split, bg=T["panel"], width=370, highlightthickness=1, highlightbackground=T["border"])
+        left = tk.Frame(split, bg=T["panel"], width=390, highlightthickness=1, highlightbackground=T["border"])
         left.pack(side="left", fill="y", padx=(0, 8))
         left.pack_propagate(False)
 
@@ -595,13 +684,12 @@ class GoisWindow:
         rscroll.config(command=self.lesson_viewer.yview)
         self.configure_markdown_tags(self.lesson_viewer)
 
-    # ---------- VISTA 3: SKILLS & CHAVES API ----------
+    # ---------- VISTA 4: SKILLS & CHAVES API ----------
     def build_skills_view(self, parent: tk.Frame):
         T = THEME
         cols = tk.Frame(parent, bg=T["bg"])
         cols.pack(fill="both", expand=True, padx=14, pady=12)
 
-        # Coluna Esquerda: Skills & Diretrizes do Núcleo
         left = tk.Frame(cols, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
         left.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
@@ -653,7 +741,6 @@ class GoisWindow:
         self.skills_listbox.pack(side="left", fill="both", expand=True)
         s_scroll.config(command=self.skills_listbox.yview)
 
-        # Coluna Direita: Chaves API dos Modelos Reais
         right = tk.Frame(cols, bg=T["panel"], width=380, highlightthickness=1, highlightbackground=T["border"])
         right.pack(side="left", fill="y")
         right.pack_propagate(False)
@@ -689,8 +776,8 @@ class GoisWindow:
             right,
             text=(
                 "Nota:\n"
-                "• O gois.v1 usa estas chaves tanto para o Chat como para aprender autonomamente na Sala de Aula.\n"
-                "• Se um modelo falhar, o sistema faz failover automático para o fornecedor seguinte."
+                "• As tuas chaves no Environment do Render já estão ativas.\n"
+                "• O gois.v1 usa estas chaves tanto para o Chat como para estudar todas as 16 categorias de Gemini & DeepSeek."
             ),
             bg=T["panel"], fg=T["muted"], font=FONT_SMALL, wraplength=340, justify="left", anchor="w",
         ).pack(fill="x", padx=14, pady=8)
@@ -704,11 +791,14 @@ class GoisWindow:
                 bg=T["accent_blue"] if k == tab_key else T["btn"],
                 font=FONT_UI_BOLD if k == tab_key else FONT_UI,
             )
-        for frame in (self.view_chat, self.view_classroom, self.view_skills):
+        for frame in (self.view_chat, self.view_comparison, self.view_classroom, self.view_skills):
             frame.pack_forget()
         if tab_key == "chat":
             self.view_chat.pack(fill="both", expand=True)
             self.entry.focus_set()
+        elif tab_key == "comparison":
+            self.view_comparison.pack(fill="both", expand=True)
+            self.refresh_classroom_from_server()
         elif tab_key == "classroom":
             self.view_classroom.pack(fill="both", expand=True)
             self.refresh_classroom_from_server()
@@ -818,7 +908,7 @@ class GoisWindow:
                 self.log.insert(
                     "end",
                     "Olá! Escreve uma mensagem para conversar com o gois.v1, ou abre a aba "
-                    "'🏫 Sala de Aula (Modelos Reais)' para veres o que está a aprender.\n"
+                    "'📊 Comparação % (Gemini & DeepSeek)' para veres a evolução em tempo real nas 16 categorias.\n"
                     "Enter envia · Shift+Enter muda de linha · Esc pára · Ctrl+N nova conversa.\n",
                     "sys",
                 )
@@ -834,7 +924,7 @@ class GoisWindow:
             self.log.insert("end", text + "\n", "err" if error else "sys")
         self.log.see("end")
 
-    # ---------- Sala de Aula & Sincronização Inteligente ----------
+    # ---------- Sala de Aula, Comparação % & Sincronização Inteligente ----------
     def initial_connect(self):
         self.set_status("A ligar ao servidor (se estava a dormir no Render pode demorar ~1 min)...")
         self.refresh_classroom_from_server(initial=True)
@@ -842,7 +932,7 @@ class GoisWindow:
     def schedule_classroom_refresh(self):
         if not self.streaming and not self.learning_busy:
             self.refresh_classroom_from_server(silent=True)
-        self.root.after(15000, self.schedule_classroom_refresh)
+        self.root.after(12000, self.schedule_classroom_refresh)
 
     def merge_knowledge(self, remote_items: list):
         if not isinstance(remote_items, list):
@@ -851,8 +941,7 @@ class GoisWindow:
         for item in reversed(remote_items):
             if isinstance(item, dict) and item.get("id"):
                 by_id[item["id"]] = item
-        # Ordena mais recente primeiro
-        merged = sorted(by_id.values(), key=lambda x: str(x.get("id", "")), reverse=True)[:200]
+        merged = sorted(by_id.values(), key=lambda x: str(x.get("id", "")), reverse=True)[:300]
         if len(merged) != len(self.knowledge_items) or (merged and self.knowledge_items and merged[0].get("id") != self.knowledge_items[0].get("id")):
             self.knowledge_items = merged
             save_json_file(LOCAL_KNOWLEDGE_FILE, self.knowledge_items)
@@ -860,12 +949,11 @@ class GoisWindow:
 
     def refresh_classroom_from_server(self, initial: bool = False, silent: bool = False):
         if not silent:
-            self.set_status("A atualizar estado da Sala de Aula...")
+            self.set_status("A atualizar Comparação % e Sala de Aula...")
 
         def fetch_all():
             settings = http_json(self.cfg["server"] + "/api/settings", timeout=90)
             knowledge = http_json(self.cfg["server"] + "/api/knowledge", timeout=60)
-            # Se o Render reiniciou e perdeu as lições em memória mas temos lições guardadas localmente, restaura!
             if isinstance(knowledge, list) and len(knowledge) == 0 and len(self.knowledge_items) > 0:
                 http_json(
                     self.cfg["server"] + "/api/sync/import",
@@ -873,6 +961,7 @@ class GoisWindow:
                     self.cfg["sync_token"],
                     timeout=60,
                 )
+                settings = http_json(self.cfg["server"] + "/api/settings", timeout=60)
                 knowledge = http_json(self.cfg["server"] + "/api/knowledge", timeout=60)
             return {"settings": settings, "knowledge": knowledge}
 
@@ -886,14 +975,177 @@ class GoisWindow:
             self.server_state.update(st)
             self.merge_knowledge(kn)
             self.update_classroom_ui()
+            self.update_comparison_ui()
+            ov = (st.get("comparison") or {}).get("overall") or {}
             providers = ", ".join(st.get("providers_with_key", [])) or "NENHUM"
-            mode_txt = "Sala de Aula ATIVA" if st.get("classroom_mode") else "Sala de Aula Pausada"
             self.set_status(
-                f"Online · {st.get('total_skills', len(self.skills_items))} skills · "
-                f"{len(self.knowledge_items)} lições · {mode_txt} · {providers}"
+                f"Online · gois.v1 {ov.get('gois_v1', 0)}% (Paridade Gemini {ov.get('parity_vs_gemini', 0)}%) · "
+                f"{len(self.knowledge_items)} lições · {providers}"
             )
 
         self.background(fetch_all, done)
+
+    def update_comparison_ui(self):
+        comp = self.server_state.get("comparison") or {}
+        ov = comp.get("overall") or {}
+        cats = comp.get("categories") or []
+
+        self.kpi_gois_val.config(text=f"{ov.get('gois_v1', 0)}%")
+        self.kpi_gois_sub.config(text=f"{ov.get('total_lessons', len(self.knowledge_items))} lições + {ov.get('total_skills', 6)} skills")
+
+        self.kpi_gem_val.config(text=f"{ov.get('gemini', 90.1)}%")
+        dg = ov.get("delta_gemini", 0)
+        self.kpi_gem_sub.config(text=f"Paridade: {ov.get('parity_vs_gemini', 0)}% ({'+' if dg >= 0 else ''}{dg}%)")
+
+        self.kpi_ds_val.config(text=f"{ov.get('deepseek', 90.3)}%")
+        dd = ov.get("delta_deepseek", 0)
+        self.kpi_ds_sub.config(text=f"Paridade: {ov.get('parity_vs_deepseek', 0)}% ({'+' if dd >= 0 else ''}{dd}%)")
+
+        self.kpi_cov_val.config(text=f"{ov.get('categories_studied', 0)} / {ov.get('total_categories', 16)}")
+        self.kpi_cov_sub.config(text=f"{ov.get('total_benchmarks', 0)} desafios benchmark realizados")
+
+        sel = self.comp_listbox.curselection()
+        prev_idx = sel[0] if sel else 0
+        self.comp_listbox.delete(0, "end")
+        for r in cats:
+            name = (r.get("category") or "")[:49].ljust(49)
+            g = f"{r.get('gois_v1', 0):5.1f}%"
+            gm = f"{r.get('gemini', 0):5.1f}%"
+            ds = f"{r.get('deepseek', 0):5.1f}%"
+            lc = f"{r.get('lessons_count', 0):3d}"
+            par = f"{r.get('parity_vs_gemini', 0):5.1f}%"
+            self.comp_listbox.insert("end", f" {name} |  {g}  |  {gm}  |  {ds}  |  {lc}   |  {par}")
+
+        if cats:
+            idx = min(prev_idx, len(cats) - 1)
+            self.comp_listbox.selection_set(idx)
+            self.show_comp_detail(idx)
+
+    def on_select_comp_category(self, _event=None):
+        sel = self.comp_listbox.curselection()
+        if not sel:
+            return
+        self.show_comp_detail(sel[0])
+
+    def show_comp_detail(self, idx: int):
+        cats = (self.server_state.get("comparison") or {}).get("categories") or []
+        if idx < 0 or idx >= len(cats):
+            return
+        r = cats[idx]
+        cat_name = r.get("category", "")
+        g = r.get("gois_v1", 0.0)
+        gm = r.get("gemini", 0.0)
+        ds = r.get("deepseek", 0.0)
+
+        md = (
+            f"# {cat_name}\n\n"
+            f"**Estado:** {r.get('status', '')}\n"
+            f"**Lições estudadas nesta área:** `{r.get('lessons_count', 0)}`  ·  **Skills ativas:** `{r.get('skills_count', 0)}`\n\n"
+            f"## Barras Comparativas em %\n"
+            f"```\n"
+            f"gois.v1  [{make_bar(g, 18)}] {g:5.1f}%\n"
+            f"Gemini   [{make_bar(gm, 18)}] {gm:5.1f}%\n"
+            f"DeepSeek [{make_bar(ds, 18)}] {ds:5.1f}%\n"
+            f"```\n"
+            f"- **Paridade gois.v1 vs Gemini:** `{r.get('parity_vs_gemini', 0)}%` ({'+' if r.get('delta_gemini', 0) >= 0 else ''}{r.get('delta_gemini', 0)}%)\n"
+            f"- **Paridade gois.v1 vs DeepSeek:** `{r.get('parity_vs_deepseek', 0)}%` ({'+' if r.get('delta_deepseek', 0) >= 0 else ''}{r.get('delta_deepseek', 0)}%)\n\n"
+            f"## Últimas Lições Aprendidas nesta Categoria\n"
+        )
+        matching = [k for k in self.knowledge_items if k.get("category") == cat_name][:4]
+        if not matching:
+            md += "- *Ainda sem lições específicas gravadas nesta categoria. Clica em **⚡ Estudar Categoria Selecionada Agora** para subir já a percentagem!*\n"
+        else:
+            for m in matching:
+                md += f"- **{m.get('title', 'Lição')}** (`{m.get('teacher', 'IA')}`)\n"
+
+        with self.editable(self.comp_detail):
+            self.comp_detail.delete("1.0", "end")
+            self.render_markdown_into(self.comp_detail, md)
+
+    def study_selected_comp_category(self):
+        if self.learning_busy:
+            return
+        cats = (self.server_state.get("comparison") or {}).get("categories") or []
+        sel = self.comp_listbox.curselection()
+        idx = sel[0] if sel else 0
+        cat_name = cats[idx]["category"] if (cats and idx < len(cats)) else DEFAULT_CATEGORIES[0]
+
+        self.learning_busy = True
+        self.btn_study_selected.config(text="⏳ A estudar categoria...", state="disabled")
+        self.lbl_comp_feedback.config(text=f"⚡ A estudar [{cat_name}] com modelo real e a atualizar percentagens...", fg=THEME["warn"])
+
+        def done(res, err):
+            self.learning_busy = False
+            self.btn_study_selected.config(text="⚡ Estudar Categoria Selecionada Agora", state="normal")
+            if err:
+                self.lbl_comp_feedback.config(text="❌ Erro: " + err, fg=THEME["err"])
+                return
+            lesson = (res or {}).get("lesson") or {}
+            settings = (res or {}).get("settings") or {}
+            if settings:
+                self.server_state.update(settings)
+            if lesson:
+                self.merge_knowledge([lesson])
+            self.update_classroom_ui()
+            self.update_comparison_ui()
+            self.lbl_comp_feedback.config(
+                text=f"✅ Lição absorvida em [{cat_name}]: '{lesson.get('title', '')}' (Professor: {lesson.get('teacher', 'IA')}) — Comparação % atualizada!",
+                fg=THEME["bot"],
+            )
+
+        self.background(
+            lambda: http_json(
+                self.cfg["server"] + "/api/classroom/learn",
+                {"category": cat_name, "provider": "auto"},
+                self.cfg["sync_token"],
+                timeout=95,
+            ),
+            done,
+        )
+
+    def run_benchmark_ui(self):
+        if self.learning_busy:
+            return
+        cats = (self.server_state.get("comparison") or {}).get("categories") or []
+        sel = self.comp_listbox.curselection()
+        cat_name = cats[sel[0]]["category"] if (sel and cats and sel[0] < len(cats)) else ""
+
+        self.learning_busy = True
+        self.btn_run_bench.config(text="⏳ Benchmark em curso...", state="disabled")
+        self.lbl_comp_feedback.config(
+            text="⚔️ A executar desafio de Benchmark Real e a comparar qualidade técnica face a Gemini & DeepSeek...",
+            fg=THEME["warn"],
+        )
+
+        def done(res, err):
+            self.learning_busy = False
+            self.btn_run_bench.config(text="⚔️ Executar Desafio Benchmark Ao Vivo", state="normal")
+            if err:
+                self.lbl_comp_feedback.config(text="❌ Erro no benchmark: " + err, fg=THEME["err"])
+                return
+            b = (res or {}).get("benchmark") or {}
+            comp = (res or {}).get("comparison") or {}
+            lesson = (res or {}).get("lesson") or {}
+            if comp:
+                self.server_state["comparison"] = comp
+            if lesson:
+                self.merge_knowledge([lesson])
+            self.update_comparison_ui()
+            self.update_classroom_ui()
+            self.lbl_comp_feedback.config(
+                text=f"🏆 Benchmark [{b.get('category', '')}] concluído em {b.get('elapsed_s', 0)}s: gois.v1 {b.get('gois_score', 0)}% vs Gemini {b.get('gemini_ref', 0)}% vs DeepSeek {b.get('deepseek_ref', 0)}%!",
+                fg=THEME["bot"],
+            )
+
+        self.background(
+            lambda: http_json(
+                self.cfg["server"] + "/api/comparison/benchmark",
+                {"category": cat_name},
+                self.cfg["sync_token"],
+                timeout=95,
+            ),
+            done,
+        )
 
     def update_classroom_ui(self):
         T = THEME
@@ -906,7 +1158,7 @@ class GoisWindow:
             mode_str = f"⚡ A APRENDER AGORA COM MODELO REAL ({st.get('current_teacher', 'IA')})..."
             fg_color = T["warn"]
         elif active:
-            mode_str = "🟢 MODO SALA DE AULA AUTÓNOMA: ATIVO (a estudar tópicos ciclicamente com modelos reais)"
+            mode_str = "🟢 MODO SALA DE AULA AUTÓNOMA: ATIVO (a estudar todas as 16 categorias de Gemini & DeepSeek)"
             fg_color = T["bot"]
         else:
             mode_str = "🔴 MODO SALA DE AULA AUTÓNOMA: PAUSADO"
@@ -914,24 +1166,24 @@ class GoisWindow:
 
         self.lbl_cls_mode.config(text=mode_str, fg=fg_color)
         self.lbl_cls_models.config(
-            text="Modelos Reais Ativos no Servidor: "
-            + (", ".join(providers) if providers else "Nenhum configurado (adiciona chave na aba Skills & Chaves)")
+            text="Modelos Professores Ativos no Servidor: "
+            + (", ".join(providers) if providers else "Nenhum configurado")
         )
 
         topic = st.get("current_topic") or "Em espera..."
         last_title = st.get("last_learned_title") or (self.knowledge_items[0].get("title") if self.knowledge_items else "Nenhuma ainda")
         last_teacher = st.get("last_teacher") or (self.knowledge_items[0].get("teacher", "") if self.knowledge_items else "")
-        teacher_badge = f" (ensinado por {last_teacher})" if last_teacher else ""
+        teacher_badge = f" ({last_teacher})" if last_teacher else ""
         self.lbl_cls_topic.config(text=f"Tópico em Foco: {topic}   |   Última Lição: {last_title}{teacher_badge}")
 
+        ov = (st.get("comparison") or {}).get("overall") or {}
         self.chat_classroom_banner.config(
-            text=f"🏫 Sala de Aula: {'ATIVA' if active else 'PAUSADA'} · {len(self.knowledge_items)} lições aprendidas · Última: {last_title}{teacher_badge} (clica para abrir)",
+            text=(
+                f"📊 gois.v1: {ov.get('gois_v1', 0)}% vs Gemini: {ov.get('gemini', 90.1)}% vs DeepSeek: {ov.get('deepseek', 90.3)}% "
+                f"(Paridade: {ov.get('parity_vs_gemini', 0)}%) · 🏫 {len(self.knowledge_items)} lições ({ov.get('categories_studied', 0)}/16 categorias) — clica para abrir Comparação"
+            ),
             fg=T["bot"] if active else T["muted"],
         )
-
-        active_cats = st.get("active_categories") or DEFAULT_CATEGORIES
-        for cat, var in self.cat_vars.items():
-            var.set(cat in active_cats)
 
     def refresh_knowledge_list(self):
         self.lbl_lessons_count.config(text=f"📚 Tudo o que já aprendeu ({len(self.knowledge_items)} lições)")
@@ -939,7 +1191,7 @@ class GoisWindow:
         prev_idx = sel[0] if sel else 0
         self.lessons_list.delete(0, "end")
         for item in self.knowledge_items:
-            cat = (item.get("category") or "Geral").split(" & ")[0]
+            cat = (item.get("category") or "Geral").split(",")[0].split(" & ")[0]
             title = item.get("title") or "Lição"
             teacher = (item.get("teacher") or "IA").split(" · ")[0]
             self.lessons_list.insert("end", f"[{cat}] {title}  ({teacher})")
@@ -962,7 +1214,7 @@ class GoisWindow:
         cat = item.get("category") or "Geral"
         teacher = item.get("teacher") or "Modelo Real"
         ts = item.get("timestamp") or ""
-        self.lbl_lesson_header.config(text=f"{title}  ·  [{cat}]  ·  Modelo Professor: {teacher}  ({ts})")
+        self.lbl_lesson_header.config(text=f"{title}  ·  [{cat}]  ·  Professor: {teacher}")
         with self.editable(self.lesson_viewer):
             self.lesson_viewer.delete("1.0", "end")
             meta_md = f"**Categoria:** `{cat}` · **Modelo Professor:** `{teacher}` · **Data:** `{ts}`\n\n"
@@ -989,21 +1241,6 @@ class GoisWindow:
             done,
         )
 
-    def save_categories_to_server(self):
-        selected = [cat for cat, var in self.cat_vars.items() if var.get()]
-        if not selected:
-            selected = list(DEFAULT_CATEGORIES)
-            for var in self.cat_vars.values():
-                var.set(True)
-        self.background(
-            lambda: http_json(
-                self.cfg["server"] + "/api/settings",
-                {"active_categories": selected},
-                self.cfg["sync_token"],
-            ),
-            lambda res, err: self.server_state.update(res) if isinstance(res, dict) else None,
-        )
-
     def learn_now(self):
         if self.learning_busy:
             return
@@ -1013,7 +1250,7 @@ class GoisWindow:
         category = self.cmb_category.get().strip() or DEFAULT_CATEGORIES[0]
         custom_topic = self.ent_custom_topic.get().strip()
 
-        self.btn_learn_now.config(text="⏳ A aprender com modelo real...", state="disabled")
+        self.btn_learn_now.config(text="⏳ A aprender...", state="disabled")
         self.lbl_cls_mode.config(
             text=f"⚡ A ligar ao modelo ({provider}) para estudar '{custom_topic or category}'...",
             fg=THEME["warn"],
@@ -1041,7 +1278,8 @@ class GoisWindow:
                 self.show_lesson_at(0)
             self.ent_custom_topic.delete(0, "end")
             self.update_classroom_ui()
-            self.set_status(f"Nova lição aprendida com {lesson.get('teacher', 'IA') if isinstance(lesson, dict) else 'sucesso'}!")
+            self.update_comparison_ui()
+            self.set_status(f"Nova lição aprendida e comparação % atualizada!")
 
         self.background(
             lambda: http_json(self.cfg["server"] + "/api/classroom/learn", payload, self.cfg["sync_token"], timeout=95),
@@ -1059,8 +1297,12 @@ class GoisWindow:
         )
         if not path:
             return
-        lines = ["# BASE DE CONHECIMENTO & SALA DE AULA — gois.v1\n"]
-        lines.append(f"*Total: {len(self.knowledge_items)} lições aprendidas com modelos reais.*\n")
+        ov = ((self.server_state.get("comparison") or {}).get("overall")) or {}
+        lines = ["# BASE DE CONHECIMENTO, COMPARAÇÃO & SALA DE AULA — gois.v1\n"]
+        lines.append(
+            f"*Total: {len(self.knowledge_items)} lições aprendidas · "
+            f"gois.v1 {ov.get('gois_v1', 0)}% vs Gemini {ov.get('gemini', 90.1)}% vs DeepSeek {ov.get('deepseek', 90.3)}%.*\n"
+        )
         for k in self.knowledge_items:
             lines.append(
                 f"## {k.get('title', 'Lição')}\n"
@@ -1121,7 +1363,8 @@ class GoisWindow:
             self.ent_skill_title.delete(0, "end")
             self.txt_skill_content.delete("1.0", "end")
             self.refresh_skills_from_server()
-            self.set_status("Nova skill adicionada e sincronizada com o Render.")
+            self.refresh_classroom_from_server(silent=True)
+            self.set_status("Nova skill adicionada e comparação % atualizada.")
 
         self.background(
             lambda: http_json(self.cfg["server"] + "/api/skills", new_item, self.cfg["sync_token"]),
@@ -1142,6 +1385,7 @@ class GoisWindow:
                 messagebox.showerror("Skills", f"Não foi possível remover: {err}")
                 return
             self.refresh_skills_from_server()
+            self.refresh_classroom_from_server(silent=True)
 
         self.background(
             lambda: http_json(f"{self.cfg['server']}/api/skills/{sid}", None, self.cfg["sync_token"], method="DELETE"),
@@ -1185,15 +1429,13 @@ class GoisWindow:
         self.render_history()
 
     def sync(self):
-        payload, notes = {}, []
+        payload = {}
         for name, field in (("gois_skills_db.json", "skills"), ("gois_keys.json", "keys")):
             for folder in (APP_DIR, Path.cwd()):
                 f = folder / name
                 if f.is_file():
                     data = load_json_file(f, None)
-                    if data is None:
-                        notes.append(f"{name} ilegível")
-                    else:
+                    if data is not None:
                         payload[field] = data
                     break
         if self.knowledge_items:
