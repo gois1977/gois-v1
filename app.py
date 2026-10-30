@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger("uvicorn.error")
@@ -25,7 +25,6 @@ PROVIDERS = [
         "name": "Groq",
         "env": "GROQ_API_KEY",
         "url": "https://api.groq.com/openai/v1/chat/completions",
-        # Cada modelo na Groq tem rate-limit separado; rodar entre eles evita o HTTP 429!
         "models": [
             os.environ.get("GROQ_MODEL", "").strip() or "llama-3.3-70b-versatile",
             "openai/gpt-oss-120b",
@@ -47,7 +46,6 @@ PROVIDERS = [
         "name": "OpenRouter",
         "env": "OPENROUTER_API_KEY",
         "url": "https://openrouter.ai/api/v1/chat/completions",
-        # Modelos 100% gratuitos (:free) para eliminar o erro HTTP 402!
         "models": [
             "deepseek/deepseek-chat-v3-0324:free",
             "deepseek/deepseek-r1:free",
@@ -55,8 +53,8 @@ PROVIDERS = [
             "meta-llama/llama-3.3-70b-instruct:free",
         ],
         "extra_headers": {
-            "HTTP-Referer": "https://gois-api.onrender.com",
-            "X-Title": "gois.api Personal Engine",
+            "HTTP-Referer": "https://gois-v1.onrender.com",
+            "X-Title": "gois.v1 Personal Engine",
         },
     },
     {
@@ -151,7 +149,7 @@ async def make_llm_request(payload: dict):
                             errors.append(f"{p['name']}/{model_name}: sem choices")
                         elif resp.status_code == 429:
                             errors.append(f"{p['name']}/{model_name}: HTTP 429")
-                            await asyncio.sleep(0.4)  # Pausa curta e tenta logo o modelo seguinte
+                            await asyncio.sleep(0.4)
                         else:
                             errors.append(f"{p['name']}/{model_name}: HTTP {resp.status_code}")
                     except Exception as e:
@@ -208,7 +206,6 @@ async def stream_llm_request(payload: dict):
                     except Exception:
                         pass
 
-    # Fallback non-stream caso todos os streams falhem
     data, errors = await make_llm_request(payload)
     if data and data.get("choices"):
         text = data["choices"][0].get("message", {}).get("content", "")
@@ -233,7 +230,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="gois.api Personal Engine", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="gois.v1 Command Center", version="2.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -244,16 +241,226 @@ app.add_middleware(
 )
 
 
-@app.get("/")
+# Rota Raiz (/): Devolve a Interface Web do Chat diretamente no Browser com Auto-Scroll
+@app.get("/", response_class=HTMLResponse)
+async def home_ui():
+    return """
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gois.v1 | Chat & Command Center</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --panel: #161b22;
+            --border: #30363d;
+            --fg: #e6edf3;
+            --user: #58a6ff;
+            --bot: #3fb950;
+            --muted: #8b949e;
+        }
+        body {
+            background-color: var(--bg);
+            color: var(--fg);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        header {
+            background-color: var(--panel);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 20px;
+            font-weight: bold;
+            font-size: 1.1rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        header span { color: var(--bot); }
+        #chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            padding-bottom: 140px;
+            scroll-behavior: smooth;
+        }
+        .message {
+            max-width: 800px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 12px 16px;
+            border-radius: 8px;
+            line-height: 1.5;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+        .message.user { background-color: rgba(88, 166, 255, 0.1); border-left: 4px solid var(--user); }
+        .message.bot { background-color: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--bot); }
+        .sender { font-weight: bold; margin-bottom: 4px; font-size: 0.9rem; }
+        .user .sender { color: var(--user); }
+        .bot .sender { color: var(--bot); }
+        #input-panel {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background-color: var(--panel);
+            border-top: 1px solid var(--border);
+            padding: 15px;
+            box-sizing: border-box;
+            display: flex;
+            justify-content: center;
+        }
+        #input-wrapper {
+            max-width: 800px;
+            width: 100%;
+            display: flex;
+            gap: 10px;
+        }
+        textarea {
+            flex: 1;
+            background-color: var(--bg);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            font-family: inherit;
+            resize: none;
+            height: 45px;
+            outline: none;
+        }
+        textarea:focus { border-color: var(--user); }
+        button {
+            background-color: var(--bot);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 0 20px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:hover { opacity: 0.9; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <span>●</span> gois.v1 | Web Interface Autónoma
+    </header>
+
+    <div id="chat-container">
+        <div class="message bot">
+            <div class="sender">gois.v1</div>
+            <div class="content">Olá! O motor autónomo está a correr diretamente no Render. Escreve a tua mensagem em baixo.</div>
+        </div>
+    </div>
+
+    <div id="input-panel">
+        <div id="input-wrapper">
+            <textarea id="user-input" placeholder="Pergunta ao goisAI..." rows="1"></textarea>
+            <button id="send-btn" onclick="sendMessage()">Enviar</button>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = ""; // Usa a mesma origem do Render
+
+        async function sendMessage() {
+            const textarea = document.getElementById('user-input');
+            const container = document.getElementById('chat-container');
+            const text = textarea.value.trim();
+            if (!text) return;
+
+            textarea.value = '';
+
+            const userMsg = document.createElement('div');
+            userMsg.className = 'message user';
+            userMsg.innerHTML = `<div class="sender">Tu</div><div class="content"></div>`;
+            userMsg.querySelector('.content').textContent = text;
+            container.appendChild(userMsg);
+            scrollToBottom();
+
+            const botMsg = document.createElement('div');
+            botMsg.className = 'message bot';
+            botMsg.innerHTML = `<div class="sender">gois.v1</div><div class="content">...</div>`;
+            container.appendChild(botMsg);
+            scrollToBottom();
+
+            const contentDiv = botMsg.querySelector('.content');
+
+            try {
+                const response = await fetch(`${API_URL}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        messages: [{ role: "user", content: text }],
+                        stream: true
+                    })
+                });
+
+                if (!response.ok) throw new Error("Erro na resposta da API");
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let fullText = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data:')) {
+                            const dataStr = line.slice(5).trim();
+                            if (dataStr === '[DONE]') break;
+                            try {
+                                const parsed = JSON.parse(dataStr);
+                                const delta = parsed.choices?.[0]?.delta?.content;
+                                if (delta) {
+                                    fullText += delta;
+                                    contentDiv.textContent = fullText;
+                                    scrollToBottom();
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }
+            } catch (err) {
+                contentDiv.textContent = "Erro de ligação ao backend: " + err.message;
+            }
+        }
+
+        function scrollToBottom() {
+            const container = document.getElementById('chat-container');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        document.getElementById('user-input').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
+    """
+
+
 @app.get("/health")
-async def home():
+async def health():
     ativos = [p["name"] for p in PROVIDERS if candidate_keys(p)]
-    return {
-        "status": "online",
-        "service": "gois.api",
-        "model": "gois.v1",
-        "active_providers": ativos,
-    }
+    return {"status": "online", "service": "gois.api", "active_providers": ativos}
 
 
 @app.head("/")
