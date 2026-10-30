@@ -196,7 +196,7 @@ async def stream_llm_request(payload: dict):
 async def lifespan(_: FastAPI):
     yield
 
-app = FastAPI(title="gois.v1 Professional Workspace & API", version="3.1.0", lifespan=lifespan)
+app = FastAPI(title="gois.v1 Professional Workspace & API", version="3.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -287,7 +287,7 @@ async def run_benchmark(request: Request):
         "comparison": DB_SETTINGS["comparison"]
     }
 
-# ----------------- INTERFACE WEB PROFISSIONAL (RAIZ) -----------------
+# ----------------- INTERFACE WEB MÓVEL / DESKTOP (RAIZ) -----------------
 @app.get("/", response_class=HTMLResponse)
 async def home_ui():
     return """
@@ -296,7 +296,7 @@ async def home_ui():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>gois.v1 | Professional Workspace</title>
+    <title>gois.v1 | Mobile Workspace</title>
     <style>
         :root {
             --bg-main: #0d1117;
@@ -320,17 +320,31 @@ async def home_ui():
             display: flex;
             height: 100vh;
             overflow: hidden;
+            position: relative;
         }
         #sidebar {
+            position: absolute;
+            left: -280px;
+            top: 0;
             width: 280px;
+            height: 100%;
             background-color: var(--bg-sidebar);
             border-right: 1px solid var(--border);
             display: flex;
             flex-direction: column;
+            z-index: 1000;
+            transition: left 0.3s ease;
+        }
+        #sidebar.open {
+            left: 0;
+            box-shadow: 10px 0 30px rgba(0,0,0,0.5);
         }
         .sidebar-header {
             padding: 16px;
             border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 10px;
+            align-items: center;
         }
         .new-chat-btn {
             background-color: var(--accent);
@@ -369,69 +383,99 @@ async def home_ui():
         .history-item:hover { background-color: var(--bg-panel); }
         .history-item.active { background-color: var(--bg-panel); border: 1px solid var(--border); }
         .history-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .delete-chat-btn { background: none; border: none; color: var(--muted); cursor: pointer; display: none; }
-        .history-item:hover .delete-chat-btn { display: block; }
+        .delete-chat-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
         .delete-chat-btn:hover { color: var(--danger); }
+
+        #overlay {
+            display: none;
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 999;
+        }
+        #overlay.active { display: block; }
+
         #main-content {
             flex: 1;
             display: flex;
             flex-direction: column;
             height: 100vh;
+            width: 100%;
             position: relative;
         }
         .top-nav {
-            padding: 12px 20px;
+            padding: 12px 16px;
             background-color: var(--bg-sidebar);
             border-bottom: 1px solid var(--border);
             display: flex;
             align-items: center;
             justify-content: space-between;
             font-weight: 600;
+            font-size: 0.95rem;
         }
+        .menu-toggle-btn {
+            background: none;
+            border: none;
+            color: var(--fg);
+            font-size: 1.2rem;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        .menu-toggle-btn:hover { background-color: var(--bg-panel); }
+
         #chat-container {
             flex: 1;
             overflow-y: auto;
-            padding: 24px;
+            padding: 16px;
             display: flex;
             flex-direction: column;
-            gap: 20px;
-            padding-bottom: 140px;
+            gap: 16px;
+            padding-bottom: 120px;
             scroll-behavior: smooth;
         }
-        .message-wrapper { max-width: 850px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 4px; }
-        .message { padding: 14px 18px; border-radius: 12px; line-height: 1.6; word-wrap: break-word; white-space: pre-wrap; font-size: 0.95rem; }
-        .message.user { background-color: var(--user-bubble); color: white; align-self: flex-end; border-bottom-right-radius: 4px; max-width: 75%; }
+        .message-wrapper { max-width: 100%; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 4px; }
+        .message { padding: 12px 16px; border-radius: 12px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; font-size: 0.9rem; }
+        .message.user { background-color: var(--user-bubble); color: white; align-self: flex-end; border-bottom-right-radius: 4px; max-width: 85%; }
         .message.bot { background-color: var(--bot-bubble); border: 1px solid var(--border); color: var(--fg); align-self: flex-start; border-bottom-left-radius: 4px; width: 100%; }
         .sender-label { font-size: 0.75rem; color: var(--muted); margin-bottom: 2px; font-weight: 600; }
+
         #input-panel {
             position: absolute; bottom: 0; left: 0; width: 100%;
             background: linear-gradient(transparent, var(--bg-main) 30%);
-            padding: 20px; display: flex; justify-content: center; box-sizing: border-box;
+            padding: 12px 16px; display: flex; justify-content: center; box-sizing: border-box;
         }
         .input-box-wrapper {
-            max-width: 850px; width: 100%; background-color: var(--bg-sidebar);
-            border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px;
-            display: flex; align-items: flex-end; gap: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+            width: 100%; background-color: var(--bg-sidebar);
+            border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px;
+            display: flex; align-items: flex-end; gap: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.3);
         }
-        textarea { flex: 1; background: transparent; color: var(--fg); border: none; resize: none; height: 24px; max-height: 150px; outline: none; font-family: inherit; }
-        .send-btn { background-color: var(--accent); color: white; border: none; border-radius: 8px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
-        .send-btn:hover { background-color: var(--accent-hover); }
-        .send-btn svg { width: 18px; height: 18px; fill: currentColor; }
+        textarea { flex: 1; background: transparent; color: var(--fg); border: none; resize: none; height: 24px; max-height: 120px; outline: none; font-family: inherit; font-size: 0.95rem; }
+        .send-btn { background-color: var(--accent); color: white; border: none; border-radius: 8px; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+        .send-btn svg { width: 16px; height: 16px; fill: currentColor; }
     </style>
 </head>
 <body>
+    <div id="overlay" onclick="toggleSidebar()"></div>
+
     <div id="sidebar">
         <div class="sidebar-header">
             <button class="new-chat-btn" onclick="createNewChat()"><span>+</span> Nova Conversa</button>
         </div>
         <div class="history-list" id="historyList"></div>
     </div>
+
     <div id="main-content">
         <div class="top-nav">
-            <span>🟢 gois.v1 | Workspace Autónomo</span>
-            <span id="activeChatTitle" style="color: var(--muted); font-size: 0.85rem;">Nova Conversa</span>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <button class="menu-toggle-btn" onclick="toggleSidebar()">☰</button>
+                <span>🟢 gois.v1</span>
+            </div>
+            <span id="activeChatTitle" style="color: var(--muted); font-size: 0.8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px;">Nova Conversa</span>
         </div>
+
         <div id="chat-container"></div>
+
         <div id="input-panel">
             <div class="input-box-wrapper">
                 <textarea id="userInput" placeholder="Escreve uma mensagem..." rows="1" oninput="autoResize(this)"></textarea>
@@ -439,6 +483,7 @@ async def home_ui():
             </div>
         </div>
     </div>
+
     <script>
         let chats = JSON.parse(localStorage.getItem('gois_chats') || '[]');
         let currentChatId = localStorage.getItem('gois_current_chat') || null;
@@ -446,6 +491,13 @@ async def home_ui():
         function saveState() {
             localStorage.setItem('gois_chats', JSON.stringify(chats));
             localStorage.setItem('gois_current_chat', currentChatId);
+        }
+
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('overlay');
+            sidebar.classList.toggle('open');
+            overlay.classList.toggle('active');
         }
 
         function initApp() {
@@ -460,6 +512,7 @@ async def home_ui():
             const newChat = { id: 'chat_' + Date.now(), title: 'Nova Conversa', messages: [] };
             chats.unshift(newChat); currentChatId = newChat.id;
             saveState(); renderHistory(); loadCurrentChat();
+            if(window.innerWidth <= 768) toggleSidebar();
         }
 
         function deleteChat(id, event) {
@@ -470,7 +523,10 @@ async def home_ui():
             saveState(); renderHistory();
         }
 
-        function switchChat(id) { currentChatId = id; saveState(); renderHistory(); loadCurrentChat(); }
+        function switchChat(id) {
+            currentChatId = id; saveState(); renderHistory(); loadCurrentChat();
+            if(window.innerWidth <= 768) toggleSidebar();
+        }
 
         function renderHistory() {
             const listEl = document.getElementById('historyList'); listEl.innerHTML = '';
@@ -491,9 +547,9 @@ async def home_ui():
             if (!chat) return;
             titleEl.textContent = chat.title;
             if (chat.messages.length === 0) {
-                appendMessageUI('gois.v1', 'Olá! O teu workspace profissional está pronto.', 'bot', false);
+                appendMessageUI('gois.v1', 'Olá! O teu workspace móvel está pronto.', 'bot');
             } else {
-                chat.messages.forEach(m => appendMessageUI(m.role === 'user' ? 'Tu' : 'gois.v1', m.content, m.role === 'user' ? 'user' : 'bot', false));
+                chat.messages.forEach(m => appendMessageUI(m.role === 'user' ? 'Tu' : 'gois.v1', m.content, m.role === 'user' ? 'user' : 'bot'));
             }
             scrollToBottom();
         }
@@ -513,7 +569,7 @@ async def home_ui():
             const text = textarea.value.trim(); if (!text) return;
             textarea.value = ''; textarea.style.height = '24px';
             const chat = chats.find(c => c.id === currentChatId);
-            if (chat.messages.length === 0) { chat.title = text.substring(0, 28); renderHistory(); }
+            if (chat.messages.length === 0) { chat.title = text.substring(0, 24); renderHistory(); }
             chat.messages.push({ role: 'user', content: text });
             appendMessageUI('Tu', text, 'user'); saveState();
             const botMsgEl = appendMessageUI('gois.v1', '...', 'bot');
