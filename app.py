@@ -15,7 +15,6 @@ logger = logging.getLogger("uvicorn.error")
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Base de dados em memória para suportar a App Desktop e o Workspace
 DB_KNOWLEDGE = []
 DB_SKILLS = []
 DB_SETTINGS = {
@@ -196,7 +195,7 @@ async def stream_llm_request(payload: dict):
 async def lifespan(_: FastAPI):
     yield
 
-app = FastAPI(title="gois.v1 Professional Workspace & API", version="3.2.0", lifespan=lifespan)
+app = FastAPI(title="gois.v1 Professional Workspace & API", version="3.5.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -287,7 +286,7 @@ async def run_benchmark(request: Request):
         "comparison": DB_SETTINGS["comparison"]
     }
 
-# ----------------- INTERFACE WEB MÓVEL / DESKTOP (RAIZ) -----------------
+# ----------------- INTERFACE WEB (RAIZ) -----------------
 @app.get("/", response_class=HTMLResponse)
 async def home_ui():
     return """
@@ -296,7 +295,7 @@ async def home_ui():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>gois.v1 | Mobile Workspace</title>
+    <title>gois.v1 | Workspace</title>
     <style>
         :root {
             --bg-main: #0d1117;
@@ -338,6 +337,11 @@ async def home_ui():
         #sidebar.open {
             left: 0;
             box-shadow: 10px 0 30px rgba(0,0,0,0.5);
+        }
+        @media(min-width: 769px) {
+            #sidebar { position: relative; left: 0 !important; }
+            #overlay { display: none !important; }
+            .menu-toggle-btn { display: none; }
         }
         .sidebar-header {
             padding: 16px;
@@ -434,7 +438,7 @@ async def home_ui():
             padding-bottom: 120px;
             scroll-behavior: smooth;
         }
-        .message-wrapper { max-width: 100%; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 4px; }
+        .message-wrapper { max-width: 850px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 4px; }
         .message { padding: 12px 16px; border-radius: 12px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; font-size: 0.9rem; }
         .message.user { background-color: var(--user-bubble); color: white; align-self: flex-end; border-bottom-right-radius: 4px; max-width: 85%; }
         .message.bot { background-color: var(--bot-bubble); border: 1px solid var(--border); color: var(--fg); align-self: flex-start; border-bottom-left-radius: 4px; width: 100%; }
@@ -446,7 +450,7 @@ async def home_ui():
             padding: 12px 16px; display: flex; justify-content: center; box-sizing: border-box;
         }
         .input-box-wrapper {
-            width: 100%; background-color: var(--bg-sidebar);
+            max-width: 850px; width: 100%; background-color: var(--bg-sidebar);
             border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px;
             display: flex; align-items: flex-end; gap: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.3);
         }
@@ -547,7 +551,7 @@ async def home_ui():
             if (!chat) return;
             titleEl.textContent = chat.title;
             if (chat.messages.length === 0) {
-                appendMessageUI('gois.v1', 'Olá! O teu workspace móvel está pronto.', 'bot');
+                appendMessageUI('gois.v1', 'Olá! O teu workspace está pronto.', 'bot');
             } else {
                 chat.messages.forEach(m => appendMessageUI(m.role === 'user' ? 'Tu' : 'gois.v1', m.content, m.role === 'user' ? 'user' : 'bot'));
             }
