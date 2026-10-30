@@ -133,14 +133,14 @@ def prepare_messages(messages: list) -> list:
     system_instruction = {
         "role": "system",
         "content": (
-            "Tu és o gois.v1, um sistema de inteligência artificial autónomo e de engenharia avançada criado pelo programador. "
-            "Modo de Operação: Mentor Técnico & Execução Passo a Passo. "
-            "1. Nunca te recuses a escrever código ou a processar pedidos técnicos. Nunca te identifies como ChatGPT ou OpenAI. "
-            "2. REGRA DE OURO DE INTERação: Nunca despejes código gigante ou soluções completas de uma só vez. "
-            "3. Quando te for pedido um projeto ou alteração: "
-            "   - Primeiro: Apresenta a tua análise técnica detalhada, sugerindo o que vai ser alterado ou inserido e dividindo o plano por etapas lógicas (Passo 1, Passo 2...). "
-            "   - Segundo: Executa estritamente **apenas o Passo 1** (com o respetivo bloco de código curto e comentado). "
-            "   - Terceiro: Pergunta sempre ao programador se pode avançar para o passo seguinte antes de enviar o resto."
+            "Tu és o gois.v1, o cérebro de engenharia avançada do painel de controlo do programador. "
+            "Modo de Operação: Mentor Técnico Metódico & Passo a Passo. "
+            "1. Nunca te recuses a escrever código. Nunca te identifies como ChatGPT ou OpenAI. "
+            "2. REGRA DE OURO: Nunca despejes soluções gigantes de uma só vez. "
+            "3. Quando te for pedido código ou alterações: "
+            "   - Primeiro: Apresenta a análise detalhada e o plano dividido por passos (Passo 1, Passo 2...). "
+            "   - Segundo: Executa estritamente **apenas o Passo 1** num bloco de código limpo. "
+            "   - Terceiro: Pergunta se queres avançar para o próximo passo."
         )
     }
     cleaned = []
@@ -224,7 +224,7 @@ async def stream_llm_request(payload: dict):
 async def lifespan(_: FastAPI):
     yield
 
-app = FastAPI(title="gois.v1 Professional Workspace & API", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="gois.v1 Professional Workspace & API", version="4.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -315,7 +315,7 @@ async def run_benchmark(request: Request):
         "comparison": DB_SETTINGS["comparison"]
     }
 
-# ----------------- INTERFACE WEB (RAIZ) -----------------
+# ----------------- INTERFACE WEB / CONTROL PANEL (RAIZ) -----------------
 @app.get("/", response_class=HTMLResponse)
 async def home_ui():
     return """
@@ -324,7 +324,7 @@ async def home_ui():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>gois.v1 | Workspace</title>
+    <title>gois.v1 | Office & Command Center</title>
     <style>
         :root {
             --bg-main: #0d1117;
@@ -338,6 +338,7 @@ async def home_ui():
             --user-bubble: #1f6feb;
             --bot-bubble: #161b22;
             --danger: #da3633;
+            --code-bg: #010409;
         }
         * { box-sizing: border-box; }
         body {
@@ -464,28 +465,73 @@ async def home_ui():
             display: flex;
             flex-direction: column;
             gap: 16px;
-            padding-bottom: 120px;
+            padding-bottom: 140px;
             scroll-behavior: smooth;
         }
-        .message-wrapper { max-width: 850px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 4px; }
-        .message { padding: 12px 16px; border-radius: 12px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; font-size: 0.9rem; }
-        .message.user { background-color: var(--user-bubble); color: white; align-self: flex-end; border-bottom-right-radius: 4px; max-width: 85%; }
+        .message-wrapper { max-width: 900px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 4px; }
+        .message { padding: 12px 16px; border-radius: 12px; line-height: 1.5; word-wrap: break-word; font-size: 0.9rem; }
+        .message.user { background-color: var(--user-bubble); color: white; align-self: flex-end; border-bottom-right-radius: 4px; max-width: 85%; white-space: pre-wrap; }
         .message.bot { background-color: var(--bot-bubble); border: 1px solid var(--border); color: var(--fg); align-self: flex-start; border-bottom-left-radius: 4px; width: 100%; }
         .sender-label { font-size: 0.75rem; color: var(--muted); margin-bottom: 2px; font-weight: 600; }
 
+        /* Estilização Profissional de Blocos de Código com Botão Copiar */
+        .code-block-container {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--bg-panel);
+            padding: 6px 12px;
+            font-size: 0.75rem;
+            color: var(--muted);
+            border-bottom: 1px solid var(--border);
+        }
+        .copy-btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 3px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .copy-btn:hover { background: var(--accent-hover); }
+        pre { margin: 0; padding: 12px; overflow-x: auto; font-family: Consolas, Monaco, monospace; font-size: 0.85rem; color: #58a6ff; }
+
+        /* Área de Input com Drop de Ficheiros */
         #input-panel {
             position: absolute; bottom: 0; left: 0; width: 100%;
             background: linear-gradient(transparent, var(--bg-main) 30%);
             padding: 12px 16px; display: flex; justify-content: center; box-sizing: border-box;
         }
         .input-box-wrapper {
-            max-width: 850px; width: 100%; background-color: var(--bg-sidebar);
+            max-width: 900px; width: 100%; background-color: var(--bg-sidebar);
             border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px;
-            display: flex; align-items: flex-end; gap: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+            display: flex; flex-direction: column; gap: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.3);
         }
+        .input-row { display: flex; align-items: flex-end; gap: 8px; width: 100%; }
         textarea { flex: 1; background: transparent; color: var(--fg); border: none; resize: none; height: 24px; max-height: 120px; outline: none; font-family: inherit; font-size: 0.95rem; }
+        
+        .file-drop-area {
+            display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+            background: var(--bg-panel); border-radius: 6px; font-size: 0.8rem; color: var(--muted);
+            border: 1px dashed var(--border); cursor: pointer;
+        }
+        .file-drop-area:hover { border-color: var(--accent); color: var(--fg); }
+        .file-pill { background: var(--user-bubble); color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 4px; }
+        
         .send-btn { background-color: var(--accent); color: white; border: none; border-radius: 8px; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
         .send-btn svg { width: 16px; height: 16px; fill: currentColor; }
+        
+        /* Drag and Drop visual feedback */
+        body.dragover { border: 2px dashed var(--accent); }
     </style>
 </head>
 <body>
@@ -502,7 +548,7 @@ async def home_ui():
         <div class="top-nav">
             <div style="display: flex; align-items: center; gap: 10px;">
                 <button class="menu-toggle-btn" onclick="toggleSidebar()">☰</button>
-                <span>🟢 gois.v1</span>
+                <span>🟢 gois.v1 | Office & Command Center</span>
             </div>
             <span id="activeChatTitle" style="color: var(--muted); font-size: 0.8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px;">Nova Conversa</span>
         </div>
@@ -510,9 +556,16 @@ async def home_ui():
         <div id="chat-container"></div>
 
         <div id="input-panel">
-            <div class="input-box-wrapper">
-                <textarea id="userInput" placeholder="Escreve uma mensagem..." rows="1" oninput="autoResize(this)"></textarea>
-                <button class="send-btn" onclick="sendMessage()"><svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
+            <div class="input-box-wrapper" id="dropZone">
+                <div id="attachedFilesContainer" style="display: flex; gap: 6px; flex-wrap: wrap;"></div>
+                <div class="input-row">
+                    <label class="file-drop-area" title="Carregar Ficheiro">
+                        📁 <span>Importar</span>
+                        <input type="file" id="fileInput" style="display: none;" multiple onchange="handleFileSelect(event)">
+                    </label>
+                    <textarea id="userInput" placeholder="Escreve uma mensagem ou arrasta ficheiros para aqui..." rows="1" oninput="autoResize(this)"></textarea>
+                    <button class="send-btn" onclick="sendMessage()"><svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
+                </div>
             </div>
         </div>
     </div>
@@ -520,6 +573,7 @@ async def home_ui():
     <script>
         let chats = JSON.parse(localStorage.getItem('gois_chats') || '[]');
         let currentChatId = localStorage.getItem('gois_current_chat') || null;
+        let attachedFiles = [];
 
         function saveState() {
             localStorage.setItem('gois_chats', JSON.stringify(chats));
@@ -539,6 +593,7 @@ async def home_ui():
                 if (!currentChatId || !chats.find(c => c.id === currentChatId)) currentChatId = chats[0].id;
                 renderHistory(); loadCurrentChat();
             }
+            setupDragAndDrop();
         }
 
         function createNewChat() {
@@ -580,32 +635,154 @@ async def home_ui():
             if (!chat) return;
             titleEl.textContent = chat.title;
             if (chat.messages.length === 0) {
-                appendMessageUI('gois.v1', 'Olá! O teu workspace está pronto.', 'bot');
+                appendMessageUI('gois.v1', 'Olá! O Command Center está pronto. Como vamos avançar passo a passo?', 'bot');
             } else {
                 chat.messages.forEach(m => appendMessageUI(m.role === 'user' ? 'Tu' : 'gois.v1', m.content, m.role === 'user' ? 'user' : 'bot'));
             }
             scrollToBottom();
         }
 
+        // Sistema de formatação de mensagens com Blocos de Código e Botão Copiar
+        function formatMessageContent(text) {
+            const container = document.createElement('div');
+            const parts = text.split(/(```[\s\S]*?```)/g);
+            
+            parts.forEach(part => {
+                if (part.startsWith('```') && part.endsWith('```')) {
+                    const lines = part.slice(3, -3).trim().split('\\n');
+                    let lang = 'código';
+                    let codeContent = part.slice(3, -3).trim();
+                    if (lines[0].trim() && !lines[0].includes(' ')) {
+                        lang = lines[0].trim();
+                        codeContent = lines.slice(1).join('\\n');
+                    }
+
+                    const blockDiv = document.createElement('div');
+                    blockDiv.className = 'code-block-container';
+                    
+                    const headerDiv = document.createElement('div');
+                    headerDiv.className = 'code-header';
+                    headerDiv.innerHTML = `<span>${lang.toUpperCase()}</span>`;
+                    
+                    const copyBtn = document.createElement('button');
+                    copyBtn.className = 'copy-btn';
+                    copyBtn.textContent = 'Copiar';
+                    copyBtn.onclick = () => {
+                        navigator.clipboard.writeText(codeContent);
+                        copyBtn.textContent = 'Copiado!';
+                        setTimeout(() => copyBtn.textContent = 'Copiar', 2000);
+                    };
+                    
+                    headerDiv.appendChild(copyBtn);
+                    blockDiv.appendChild(headerDiv);
+
+                    const preEl = document.createElement('pre');
+                    const codeEl = document.createElement('code');
+                    codeEl.textContent = codeContent;
+                    preEl.appendChild(codeEl);
+                    blockDiv.appendChild(preEl);
+                    
+                    container.appendChild(blockDiv);
+                } else {
+                    const p = document.createElement('div');
+                    p.style.whiteSpace = 'pre-wrap';
+                    p.textContent = part;
+                    container.appendChild(p);
+                }
+            });
+            return container;
+        }
+
         function appendMessageUI(sender, text, type) {
             const container = document.getElementById('chat-container');
             const wrapper = document.createElement('div'); wrapper.className = 'message-wrapper';
             const label = document.createElement('div'); label.className = 'sender-label'; label.textContent = sender;
-            const msg = document.createElement('div'); msg.className = `message ${type}`; msg.textContent = text;
+            const msg = document.createElement('div'); msg.className = `message ${type}`;
+            
+            if (type === 'bot') {
+                msg.appendChild(formatMessageContent(text));
+            } else {
+                msg.textContent = text;
+            }
+
             wrapper.appendChild(label); wrapper.appendChild(msg); container.appendChild(wrapper);
             scrollToBottom();
             return msg;
         }
 
+        // Gestão de Ficheiros (Drop e Importação)
+        function handleFileSelect(event) {
+            const files = event.target.files;
+            processFiles(files);
+        }
+
+        function setupDragAndDrop() {
+            const dropZone = document.getElementById('dropZone');
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => { e.preventDefault(); dropZone.style.borderColor = 'var(--accent)'; }, false);
+            });
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => { e.preventDefault(); dropZone.style.borderColor = 'var(--border)'; }, false);
+            });
+            dropZone.addEventListener('drop', (e) => {
+                const files = e.dataTransfer.files;
+                processFiles(files);
+            }, false);
+        }
+
+        function processFiles(files) {
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    attachedFiles.push({ name: file.name, content: e.target.result });
+                    renderAttachedFiles();
+                };
+                reader.readAsText(file);
+            }
+        }
+
+        function renderAttachedFiles() {
+            const container = document.getElementById('attachedFilesContainer');
+            container.innerHTML = '';
+            attachedFiles.forEach((file, index) => {
+                const pill = document.createElement('div');
+                pill.className = 'file-pill';
+                pill.innerHTML = `📄 ${file.name} <span style="cursor:pointer;" onclick="removeFile(${index})">✕</span>`;
+                container.appendChild(pill);
+            });
+        }
+
+        function removeFile(index) {
+            attachedFiles.splice(index, 1);
+            renderAttachedFiles();
+        }
+
         async function sendMessage() {
             const textarea = document.getElementById('userInput');
-            const text = textarea.value.trim(); if (!text) return;
+            let text = textarea.value.trim();
+            if (!text && attachedFiles.length === 0) return;
+
+            // Anexar conteúdo dos ficheiros à mensagem se existirem
+            if (attachedFiles.length > 0) {
+                let fileDump = "\\n\\n[Ficheiros Anexados:\\n";
+                attachedFiles.forEach(f => {
+                    fileDump += `--- Ficheiro: ${f.name} ---\\n${f.content}\\n`;
+                });
+                fileDump += "]";
+                text += fileDump;
+                attachedFiles = [];
+                renderAttachedFiles();
+            }
+
             textarea.value = ''; textarea.style.height = '24px';
             const chat = chats.find(c => c.id === currentChatId);
             if (chat.messages.length === 0) { chat.title = text.substring(0, 24); renderHistory(); }
+            
             chat.messages.push({ role: 'user', content: text });
             appendMessageUI('Tu', text, 'user'); saveState();
-            const botMsgEl = appendMessageUI('gois.v1', '...', 'bot');
+            
+            const botMsgEl = appendMessageUI('gois.v1', 'A analisar passo a passo...', 'bot');
             let fullReply = "";
             try {
                 const response = await fetch('/v1/chat/completions', {
@@ -613,6 +790,10 @@ async def home_ui():
                     body: JSON.stringify({ messages: chat.messages, stream: true })
                 });
                 const reader = response.body.getReader(); const decoder = new TextDecoder();
+                botMsgEl.innerHTML = ''; // Limpar indicador de carregamento
+                const contentDiv = document.createElement('div');
+                botMsgEl.appendChild(contentDiv);
+
                 while (true) {
                     const { done, value } = await reader.read(); if (done) break;
                     const chunk = decoder.decode(value, { stream: true });
@@ -623,7 +804,12 @@ async def home_ui():
                             try {
                                 const parsed = JSON.parse(dataStr);
                                 const delta = parsed.choices?.[0]?.delta?.content;
-                                if (delta) { fullReply += delta; botMsgEl.textContent = fullReply; scrollToBottom(); }
+                                if (delta) { 
+                                    fullReply += delta; 
+                                    botMsgEl.innerHTML = '';
+                                    botMsgEl.appendChild(formatMessageContent(fullReply));
+                                    scrollToBottom(); 
+                                }
                             } catch (e) {}
                         }
                     }
