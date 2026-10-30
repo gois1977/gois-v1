@@ -221,7 +221,7 @@ async def stream_llm_request(payload: dict):
 async def lifespan(_: FastAPI):
     yield
 
-app = FastAPI(title="gois.v1 Professional Workspace & API", version="4.3.0", lifespan=lifespan)
+app = FastAPI(title="gois.v1 Professional Workspace & API", version="4.4.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -471,7 +471,7 @@ async def home_ui():
         .message.bot { background-color: var(--bot-bubble); border: 1px solid var(--border); color: var(--fg); align-self: flex-start; border-bottom-left-radius: 4px; width: 100%; }
         .sender-label { font-size: 0.75rem; color: var(--muted); margin-bottom: 2px; font-weight: 600; }
 
-        /* Blocos de Código e Botão Copiar */
+        /* Blocos de Código com Botões Bonitos (Copiar + Download) */
         .code-block-container {
             background: var(--code-bg);
             border: 1px solid var(--border);
@@ -484,25 +484,38 @@ async def home_ui():
             justify-content: space-between;
             align-items: center;
             background: var(--bg-panel);
-            padding: 6px 12px;
+            padding: 8px 12px;
             font-size: 0.75rem;
             color: var(--muted);
             border-bottom: 1px solid var(--border);
         }
-        .copy-btn {
-            background: var(--accent);
-            color: white;
-            border: none;
-            padding: 3px 8px;
+        .code-actions {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+        .action-btn {
+            background: var(--bg-sidebar);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 4px 10px;
             border-radius: 4px;
             cursor: pointer;
             font-size: 0.75rem;
             font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.2s;
         }
-        .copy-btn:hover { background: var(--accent-hover); }
+        .action-btn:hover {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+        }
         pre { margin: 0; padding: 12px; overflow-x: auto; font-family: Consolas, Monaco, monospace; font-size: 0.85rem; color: #58a6ff; white-space: pre-wrap; }
 
-        /* Painel de Input com Drop Bloqueado para evitar abertura de ficheiro no browser */
+        /* Painel de Input com Drop Funcional */
         #input-panel {
             position: absolute; bottom: 0; left: 0; width: 100%;
             background: linear-gradient(transparent, var(--bg-main) 30%);
@@ -656,15 +669,25 @@ async def home_ui():
             const container = document.createElement('div');
             const parts = text.split(/(```[\s\S]*?```)/g);
             
-            parts.forEach(part => {
+            parts.forEach((part, index) => {
                 if (part.startsWith('```') && part.endsWith('```')) {
                     const lines = part.slice(3, -3).trim().split('\\n');
-                    let lang = 'código';
+                    let lang = 'code';
                     let codeContent = part.slice(3, -3).trim();
                     if (lines[0].trim() && !lines[0].includes(' ')) {
                         lang = lines[0].trim();
                         codeContent = lines.slice(1).join('\\n');
                     }
+
+                    // Determinar extensão recomendada para o download do ficheiro
+                    let fileExt = 'txt';
+                    let l = lang.toLowerCase();
+                    if (l.includes('py')) fileExt = 'py';
+                    else if (l.includes('js')) fileExt = 'js';
+                    else if (l.includes('html')) fileExt = 'html';
+                    else if (l.includes('css')) fileExt = 'css';
+                    else if (l.includes('json')) fileExt = 'json';
+                    else if (l.includes('docker') || l.includes('file')) fileExt = 'txt';
 
                     const blockDiv = document.createElement('div');
                     blockDiv.className = 'code-block-container';
@@ -673,16 +696,40 @@ async def home_ui():
                     headerDiv.className = 'code-header';
                     headerDiv.innerHTML = `<span>${lang.toUpperCase()}</span>`;
                     
+                    const actionsDiv = document.createElement('div');
+                    actionsDiv.className = 'code-actions';
+
+                    // Botão Copiar Bonito
                     const copyBtn = document.createElement('button');
-                    copyBtn.className = 'copy-btn';
-                    copyBtn.textContent = 'Copiar';
+                    copyBtn.className = 'action-btn';
+                    copyBtn.innerHTML = '📋 Copiar';
                     copyBtn.onclick = () => {
                         navigator.clipboard.writeText(codeContent);
-                        copyBtn.textContent = 'Copiado!';
-                        setTimeout(() => copyBtn.textContent = 'Copiar', 2000);
+                        copyBtn.innerHTML = '✅ Copiado!';
+                        setTimeout(() => copyBtn.innerHTML = '📋 Copiar', 2000);
                     };
-                    
-                    headerDiv.appendChild(copyBtn);
+
+                    // Botão Download de Ficheiro Bonito
+                    const downloadBtn = document.createElement('button');
+                    downloadBtn.className = 'action-btn';
+                    downloadBtn.innerHTML = '💾 Download';
+                    downloadBtn.onclick = () => {
+                        const blob = new Blob([codeContent], { type: 'text/plain;charset=utf-8' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `gois_snippet_${index}.${fileExt}`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        downloadBtn.innerHTML = '✅ Baixado!';
+                        setTimeout(() => downloadBtn.innerHTML = '💾 Download', 2000);
+                    };
+
+                    actionsDiv.appendChild(copyBtn);
+                    actionsDiv.appendChild(downloadBtn);
+                    headerDiv.appendChild(actionsDiv);
                     blockDiv.appendChild(headerDiv);
 
                     const preEl = document.createElement('pre');
@@ -719,7 +766,6 @@ async def home_ui():
             return msg;
         }
 
-        // Prevenção estrita para aceitar o Drop de Ficheiros do PC sem abrir o browser
         function setupDragAndDrop() {
             const dropZone = document.getElementById('dropZone');
             
