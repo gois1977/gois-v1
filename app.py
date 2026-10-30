@@ -1,8 +1,8 @@
 """gois.v1 API 6.0 - chat com failover, Sala de Aula, benchmark, skills e persistência.
 
 Variáveis de ambiente (Render > Environment):
-  ADMIN_TOKEN = "Vicente2013@"
-  GROQ_API_KEY , GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY = "mstrl_DOpXZ4J0DCQ7Yz529abt08bMEewboLGj_3FzGnx"
+  ADMIN_TOKEN        palavra-passe do modo admin (obrigatória para o Command Center)
+  GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY   (pelo menos uma)
   DATA_DIR           (opcional) pasta onde guardar gois_db.json
 """
 import os
@@ -261,13 +261,15 @@ ADMIN_PROMPT = (
     "Tu és o gois.v1, o assistente de engenharia do teu criador (Modo Admin). "
     "Responde em português europeu, de forma direta e técnica, sem sermões nem avisos desnecessários. "
     "Nunca te identifiques como ChatGPT ou OpenAI: és exclusivamente o gois.v1. "
+    "Se perguntarem que modelo, empresa ou fornecedor está por trás de ti, responde apenas que és o gois.v1. "
     "Metodologia: responde passo a passo, entrega código completo em blocos ``` com a linguagem indicada "
     "(e o nome do ficheiro depois da linguagem, ex.: ```python app.py) e aguarda confirmação antes de avançar."
 )
 PUBLIC_PROMPT = (
     "Tu és o gois.v1, um assistente virtual inteligente e útil. Modo de Operação: Público e Seguro. "
     "Respeita as normas de segurança e ética, responde de forma cordial, clara e segura, em português europeu "
-    "por omissão. Nunca te identifiques como ChatGPT ou OpenAI. O teu nome é gois.v1."
+    "por omissão. Nunca te identifiques como ChatGPT ou OpenAI. O teu nome é gois.v1. "
+    "Se perguntarem que modelo ou fornecedor está por trás de ti, responde apenas que és o gois.v1."
 )
 
 
@@ -339,7 +341,8 @@ async def make_llm_request(payload: dict, is_admin: bool = False):
     data, prov, model, errors = await try_providers(messages, payload.get("temperature", 0.6), timeout=65.0)
     if data is None:
         return None, errors
-    data["model"] = f"gois.v1 ({prov} · {model})"
+    logger.info("gois.v1 respondeu (motor interno: %s/%s)", prov, model)  # só nos logs do servidor
+    data["model"] = "gois.v1"
     add_tokens(usage_tokens(data, reply_text(data)))
     return data, []
 
@@ -376,9 +379,7 @@ async def stream_llm_request(payload: dict, is_admin: bool = False):
                                 if delta:
                                     got_content = True  # BUG ANTIGO: esta flag nunca era posta a True
                                     chars += len(delta)
-                                if not sent_model:
-                                    chunk["model"] = f"gois.v1 ({p['name']} · {model_name})"
-                                    sent_model = True
+                                chunk["model"] = "gois.v1"  # o cliente nunca vê o fornecedor/modelo interno
                                 yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
                         if got_content:
                             add_tokens(max(1, chars // 4))
@@ -828,7 +829,9 @@ async def process_chat(request: Request):
     data, errors = await make_llm_request(payload, admin)
     if data is not None:
         return JSONResponse(content=data)
-    raise HTTPException(status_code=502, detail="Erro Failover: " + " | ".join(errors))
+    logger.warning("Falha em todos os motores: %s", " | ".join(errors))
+    detail = "Erro Failover: " + " | ".join(errors) if admin else "O gois.v1 está temporariamente indisponível. Tenta de novo."
+    raise HTTPException(status_code=502, detail=detail)
 
 
 if __name__ == "__main__":
