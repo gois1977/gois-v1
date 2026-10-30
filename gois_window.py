@@ -1208,7 +1208,11 @@ class GoisWindow(tk.Tk):
             if picked:
                 guide = "Especialidades relevantes (usa-as só se ajudarem a pergunta):\n" + "\n".join(
                     f"- {sk['title']}: {sk.get('content', '')[:400]}" for sk in picked)
-                out.insert(0, {"role": "system", "content": guide})
+                # o servidor só aceita mensagens user/assistant: o contexto vai dentro da última pergunta
+                for m in reversed(out):
+                    if m["role"] == "user":
+                        m["content"] = guide + "\n\nPergunta:\n" + m["content"]
+                        break
         return out
 
     def request_reply(self):
@@ -1229,7 +1233,7 @@ class GoisWindow(tk.Tk):
                     reply = (res["choices"][0]["message"].get("content") or "").strip() or "Sem resposta."
                 except Exception:
                     reply = "Sem resposta."
-                sess["messages"].append({"role": "bot", "text": reply, "model": res.get("model", "")})
+                sess["messages"].append({"role": "bot", "text": reply, "model": "gois.v1"})
                 self.touch(sess)
                 self.save_sessions()
                 self.refresh_session_list()
