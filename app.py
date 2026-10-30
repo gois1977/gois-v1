@@ -187,7 +187,7 @@ async def stream_llm_request(payload: dict, is_admin: bool = False):
 async def lifespan(_: FastAPI):
     yield
 
-app = FastAPI(title="gois.v1 API", version="5.1.0", lifespan=lifespan)
+app = FastAPI(title="gois.v1 API", version="5.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -197,6 +197,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Endpoints exigidos pelo gois_window.py e sincronização
 @app.get("/api/settings")
 async def get_settings():
     active_providers = [p["name"] for p in PROVIDERS if candidate_keys(p)]
@@ -209,6 +210,20 @@ async def update_settings(request: Request):
     DB_SETTINGS.update(body)
     return DB_SETTINGS
 
+@app.get("/api/knowledge")
+async def get_knowledge():
+    return DB_KNOWLEDGE
+
+@app.get("/api/skills")
+async def get_skills():
+    return DB_SKILLS
+
+@app.post("/api/skills")
+async def add_skill(request: Request):
+    body = await request.json()
+    DB_SKILLS.append(body)
+    return {"success": True}
+
 @app.get("/api/keys/status")
 async def keys_status():
     status = {}
@@ -216,6 +231,21 @@ async def keys_status():
         has_key = bool(candidate_keys(p))
         status[p["name"]] = {"configured": has_key, "source": "environment" if has_key else "", "model": p["models"][0]}
     return status
+
+@app.post("/api/keys")
+async def set_key(request: Request):
+    body = await request.json()
+    provider = body.get("provider")
+    key = body.get("key")
+    for p in PROVIDERS:
+        if p["name"].lower() == provider.lower():
+            RUNTIME_KEYS[p["env"]] = key
+            return {"persisted": True}
+    return {"persisted": False}
+
+@app.get("/api/render/status")
+async def render_status():
+    return {"enabled": True, "missing": []}
 
 @app.get("/", response_class=HTMLResponse)
 async def home_ui():
