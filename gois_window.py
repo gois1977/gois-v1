@@ -1,96 +1,179 @@
-"""gois.v1 Command Center - Aplicação Desktop Completa (Tkinter + stdlib).
+"""gois.v1 | Office & Command Center - Aplicação Desktop (v2.3)
 
-Secções incluídas:
-  1. 💬 Chat: Streaming SSE em tempo real, Markdown com cópia de código, Parar, Regenerar, Exportar.
-  2. 📊 Comparação % (Gemini & DeepSeek): Matriz comparativa em tempo real (Global e nas 16 categorias
-     completas do Gemini e DeepSeek), com evolução ao vivo, barras de paridade e execução de Benchmark Real.
-  3. 🏫 Sala de Aula (16 Categorias): Liga-se a DeepSeek, Gemini, GPT-OSS 120B e Mistral para estudar
-     todas as 16 categorias autonomamente ou a pedido, mostrando o que está a estudar e tudo o que já aprendeu.
-  4. 🧠 Skills & Chaves API: Gestão de Skills/Diretrizes do núcleo e configuração de chaves API.
+Corre sempre como Administrador do Windows (pede elevação UAC ao abrir).
+Tema claro/escuro, totais gois.v1/Gemini/DeepSeek sempre no topo, comparação ao vivo com gráficos, chat com histórico
+pesquisável e anexos, Sala de Aula com cópia local e 120 skills integradas.
 """
-import ctypes
-import json
 import os
-import queue
 import re
 import sys
-import threading
+import csv
+import json
 import time
-import urllib.error
-import urllib.parse
+import queue
+import threading
+import subprocess
+import zipfile
 import urllib.request
-from contextlib import contextmanager
+import urllib.error
+import xml.etree.ElementTree as ET
 from pathlib import Path
-
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import ttk, messagebox, filedialog, simpledialog
+
+try:
+    import windnd  # arrastar-e-largar ficheiros (Windows)
+except Exception:  # pragma: no cover
+    windnd = None
+
+HERE = Path(getattr(sys, "_MEIPASS", None) or Path(__file__).resolve().parent)
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+try:
+    from gois_skills import SKILLS as BUILTIN_SKILLS, CATEGORIES as DEFAULT_CATEGORIES
+    SKILLS_ERROR = ""
+except Exception as _e:  # gois_skills.py em falta/corrompido: a app abre na mesma e avisa
+    SKILLS_ERROR = f"{type(_e).__name__}: {_e}"
+    BUILTIN_SKILLS = []
+    DEFAULT_CATEGORIES = [
+        "Arquitetura de Software & Sistemas Assíncronos", "Algoritmos, Estruturas de Dados & Programação",
+        "Game Design, Unity C# & Motores 3D", "WebGL, Three.js, Frontend & Gráficos 2D/3D",
+        "Matemática Avançada, Lógica & Raciocínio Formal", "Inteligência Artificial, LLMs, RAG & Agentes",
+        "Ciência de Dados, SQL & Engenharia de Dados", "Cibersegurança, Criptografia & Auditoria",
+        "DevOps, Cloud, Docker & Sistemas Linux", "Engenharia, AutoCAD, Robótica & IoT",
+        "Física, Química, Biologia & Ciências Exatas", "Multimodalidade, Visão Computacional & Áudio",
+        "Linguística, Tradução & Comunicação Multilingue", "Economia, Finanças Quantitativas & Estratégia",
+        "Direito Tecnológico, Ética & Segurança de IA", "Otimização Extrema & Hardware Leve / Edge AI",
+    ]
 
 APP_NAME = "gois.v1 | Office & Command Center"
 DEFAULT_SERVER = "https://gois-v1.onrender.com"
 
-APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "gois_v1"
 CONFIG_FILE = DATA_DIR / "config.json"
-LEGACY_CONFIG_FILE = APP_DIR / "gois_window_config.json"
-SESSION_FILE = DATA_DIR / "session.json"
-LOCAL_KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"
-LOCAL_SKILLS_FILE = DATA_DIR / "skills.json"
+SESSION_FILE = DATA_DIR / "multichats.json"
+LOCAL_SKILLS_FILE = DATA_DIR / "skills.json"          # skills criadas por ti
+KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"          # cópia local das lições da Sala de Aula
 
-DEFAULT_CATEGORIES = [
-    "Arquitetura de Software & Sistemas Assíncronos",
-    "Algoritmos, Estruturas de Dados & Programação",
-    "Game Design, Unity C# & Motores 3D",
-    "WebGL, Three.js, Frontend & Gráficos 2D/3D",
-    "Matemática Avançada, Lógica & Raciocínio Formal",
-    "Inteligência Artificial, LLMs, RAG & Agentes",
-    "Ciência de Dados, SQL & Engenharia de Dados",
-    "Cibersegurança, Criptografia & Auditoria",
-    "DevOps, Cloud, Docker & Sistemas Linux",
-    "Engenharia, AutoCAD, Robótica & IoT",
-    "Física, Química, Biologia & Ciências Exatas",
-    "Multimodalidade, Visão Computacional & Áudio",
-    "Linguística, Tradução & Comunicação Multilingue",
-    "Economia, Finanças Quantitativas & Estratégia",
-    "Direito Tecnológico, Ética & Segurança de IA",
-    "Otimização Extrema & Hardware Leve / Edge AI",
-]
+APP_VERSION = "2.3"
+COMP_CACHE_FILE = DATA_DIR / "settings_cache.json"      # última leitura do servidor (mostra dados mesmo offline)
+HISTORY_FILE = DATA_DIR / "comparison_history.json"     # histórico dos totais para o gráfico de evolução
 
-THEME = {
-    "bg": "#0d1117",
-    "panel": "#161b22",
-    "panel_alt": "#1c2330",
-    "border": "#30363d",
-    "fg": "#e6edf3",
-    "muted": "#8b949e",
-    "user": "#58a6ff",
-    "bot": "#3fb950",
-    "purple": "#bc8cff",
-    "warn": "#d29922",
-    "err": "#f85149",
-    "code_bg": "#1c2330",
-    "btn": "#21262d",
-    "btn_hover": "#30363d",
-    "accent": "#238636",
-    "accent_blue": "#1f6feb",
+THEMES = {
+    "dark": {
+        "name": "dark", "bg": "#0d1117", "panel": "#161b22", "panel_alt": "#1c2330", "border": "#30363d",
+        "fg": "#e6edf3", "muted": "#8b949e", "user": "#58a6ff", "bot": "#3fb950", "btn": "#21262d",
+        "accent": "#238636", "accent_blue": "#1f6feb", "code_bg": "#010409", "code_fg": "#79c0ff",
+        "warn": "#d29922", "danger": "#f85149", "user_bg": "#16233a",
+        "s_gois": "#3fb950", "s_gemini": "#4493f8", "s_deepseek": "#b083f0",
+    },
+    "light": {
+        "name": "light", "bg": "#f6f8fa", "panel": "#ffffff", "panel_alt": "#eaeef2", "border": "#d0d7de",
+        "fg": "#1f2328", "muted": "#59636e", "user": "#0969da", "bot": "#1a7f37", "btn": "#eaeef2",
+        "accent": "#1a7f37", "accent_blue": "#0969da", "code_bg": "#f6f8fa", "code_fg": "#0550ae",
+        "warn": "#9a6700", "danger": "#cf222e", "user_bg": "#ddf4ff",
+        "s_gois": "#1a7f37", "s_gemini": "#0969da", "s_deepseek": "#8250df",
+    },
 }
-FONT_UI = ("Segoe UI", 10)
-FONT_UI_BOLD = ("Segoe UI", 10, "bold")
-FONT_SMALL = ("Segoe UI", 9)
-FONT_CODE = ("Consolas", 10)
+THEME = dict(THEMES["dark"])
 
 
-# =====================================================================
-# LÓGICA PURA E REDE
-# =====================================================================
+def set_theme(name: str) -> None:
+    THEME.clear()
+    THEME.update(THEMES.get(name, THEMES["dark"]))
 
-def load_json_file(path: Path, default):
+
+def series_color(key: str) -> str:
+    return THEME["s_" + key]
+
+EXT = {
+    "python": "py", "py": "py", "javascript": "js", "js": "js", "typescript": "ts", "ts": "ts", "tsx": "tsx",
+    "jsx": "jsx", "html": "html", "css": "css", "json": "json", "bash": "sh", "sh": "sh", "shell": "sh",
+    "powershell": "ps1", "ps1": "ps1", "bat": "bat", "batch": "bat", "cmd": "bat", "c": "c", "cpp": "cpp",
+    "c++": "cpp", "csharp": "cs", "cs": "cs", "c#": "cs", "java": "java", "go": "go", "rust": "rs", "rs": "rs",
+    "sql": "sql", "yaml": "yml", "yml": "yml", "xml": "xml", "markdown": "md", "md": "md", "iss": "iss",
+    "toml": "toml", "ini": "ini", "lua": "lua", "glsl": "glsl", "txt": "txt",
+}
+FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.S)
+MAX_FILE = 200_000
+BLOCKED_EXT = {".exe", ".dll", ".zip", ".7z", ".rar", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf",
+               ".mp3", ".mp4", ".wav", ".iso", ".bin", ".xlsx", ".pptx"}
+
+
+# --------------------------------------------------------------------------- #
+# Administrador do Windows
+# --------------------------------------------------------------------------- #
+def is_windows_admin() -> bool:
+    if sys.platform != "win32":
+        return hasattr(os, "geteuid") and os.geteuid() == 0
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
-        return default
+        return False
 
 
-def save_json_file(path: Path, data) -> None:
+def relaunch_as_admin() -> bool:
+    """Reabre a app com o prompt UAC. True se o utilizador aceitou (o processo atual deve terminar)."""
+    try:
+        import ctypes
+        if getattr(sys, "frozen", False):
+            exe, args = sys.executable, sys.argv[1:]
+        else:
+            exe = sys.executable
+            pyw = Path(exe).with_name("pythonw.exe")  # sem janela de consola
+            exe = str(pyw) if pyw.exists() else exe
+            args = [os.path.abspath(sys.argv[0])] + sys.argv[1:]
+        params = " ".join(f'"{a}"' for a in args)
+        workdir = str(Path(args[0]).parent) if args and not getattr(sys, "frozen", False) else None
+        return ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, workdir, 1) > 32
+    except Exception:
+        return False
+
+
+def migrate_legacy_data(target: Path) -> None:
+    """Ao correr como outro utilizador admin, o %APPDATA% muda e o histórico/skills/token 'desaparecem'.
+    Procura pastas gois_v1 de outros perfis e junta o que falta aqui (nunca apaga nada)."""
+    try:
+        cands = {Path.home() / "AppData" / "Roaming" / "gois_v1"}
+        users = Path(os.environ.get("SystemDrive", "C:") + os.sep) / "Users"
+        if users.exists():
+            cands |= set(users.glob("*/AppData/Roaming/gois_v1"))
+        for src in cands:
+            if not src.exists() or src.resolve() == target.resolve():
+                continue
+            for name, key in (("multichats.json", "id"), ("skills.json", "title"), ("knowledge.json", "id")):
+                other = read_json(src / name, [])
+                if not isinstance(other, list) or not other:
+                    continue
+                mine = read_json(target / name, [])
+                mine = mine if isinstance(mine, list) else []
+                have = {x.get(key) for x in mine if isinstance(x, dict)}
+                extra = [x for x in other if isinstance(x, dict) and x.get(key) and x.get(key) not in have]
+                if not extra:
+                    continue
+                if name == "multichats.json":  # descarta a conversa vazia criada por omissão
+                    mine = [m for m in mine if m.get("messages")]
+                write_json(target / name, mine + extra)
+            if not (target / "config.json").exists() and (src / "config.json").exists():
+                write_json(target / "config.json", read_json(src / "config.json", {}))
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# Utilitários
+# --------------------------------------------------------------------------- #
+def read_json(path: Path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return default
+
+
+def write_json(path: Path, data) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -100,1965 +183,1991 @@ def save_json_file(path: Path, data) -> None:
         pass
 
 
-def load_config() -> dict:
-    cfg = {"server": DEFAULT_SERVER, "sync_token": "", "temperature": 0.5, "history": 30,
-           "daily_token_limit": 0, "usage_cache": {}}
-    legacy = load_json_file(LEGACY_CONFIG_FILE, {})
-    if isinstance(legacy, dict):
-        cfg.update({k: legacy[k] for k in cfg if k in legacy})
-    saved = load_json_file(CONFIG_FILE, {})
-    if isinstance(saved, dict):
-        cfg.update({k: saved[k] for k in cfg if k in saved})
-    cfg["server"] = str(cfg["server"]).strip().rstrip("/") or DEFAULT_SERVER
-    return cfg
-
-
-def parse_sse_line(raw: str) -> list:
-    line = raw.strip()
-    if not line.startswith("data:"):
-        return []
-    data = line[5:].strip()
-    if not data:
-        return []
-    if data == "[DONE]":
-        return [("done", None)]
-    try:
-        obj = json.loads(data)
-    except Exception:
-        return []
-    if not isinstance(obj, dict):
-        return []
-    events = []
-    if obj.get("error"):
-        err = obj["error"]
-        events.append(("error", err.get("message", str(err)) if isinstance(err, dict) else str(err)))
-        return events
-    if obj.get("model"):
-        events.append(("model", str(obj["model"])))
-    choices = obj.get("choices") or []
-    if choices and isinstance(choices[0], dict):
-        text = (choices[0].get("delta") or {}).get("content")
-        if text:
-            events.append(("delta", text))
-    return events
-
-
-_INLINE_RE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
-
-
-def parse_inline(text: str) -> list:
-    runs = []
-    for part in _INLINE_RE.split(text):
-        if not part:
-            continue
-        if part.startswith("**") and part.endswith("**") and len(part) > 4:
-            runs.append((part[2:-2], "bold"))
-        elif part.startswith("`") and part.endswith("`") and len(part) > 2:
-            runs.append((part[1:-1], "icode"))
-        else:
-            runs.append((part, None))
-    return runs
-
-
-def parse_markdown(text: str) -> list:
-    blocks = []
-    lines = text.replace("\r\n", "\n").split("\n")
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            lang = stripped[3:].strip()
-            code = []
-            i += 1
-            while i < len(lines) and not lines[i].strip().startswith("```"):
-                code.append(lines[i])
-                i += 1
-            i += 1
-            blocks.append(("code", lang, "\n".join(code)))
-            continue
-        m = re.match(r"^(#{1,3})\s+(.*)$", stripped)
-        if m:
-            blocks.append(("line", f"h{len(m.group(1))}", parse_inline(m.group(2))))
-        else:
-            b = re.match(r"^(\s*)[-*]\s+(.*)$", line)
-            if b:
-                blocks.append(("line", "li", parse_inline(b.group(2))))
-            else:
-                blocks.append(("line", "p", parse_inline(line)))
-        i += 1
+def split_blocks(text: str):
+    """Divide uma resposta em blocos de texto e de código."""
+    blocks, last = [], 0
+    for m in FENCE_RE.finditer(text):
+        if m.start() > last:
+            blocks.append({"kind": "text", "text": text[last:m.start()]})
+        info = m.group(1).strip().split()
+        lang = (info[0] if info else "").lower()
+        fname = next((p for p in info[1:] if "." in p), "")
+        if "." in lang:
+            fname, lang = lang, lang.rsplit(".", 1)[-1]
+        blocks.append({"kind": "code", "lang": lang, "fname": fname, "code": m.group(2).rstrip("\n")})
+        last = m.end()
+    if last < len(text):
+        blocks.append({"kind": "text", "text": text[last:]})
     return blocks
 
 
-def http_json(url: str, payload=None, token: str = "", timeout: int = 120, method: str = ""):
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["X-Sync-Token"] = token
-    verb = method or ("POST" if data is not None else "GET")
-    req = urllib.request.Request(url, data=data, headers=headers, method=verb)
+def read_attachment(path: str):
+    """-> (conteúdo | None, aviso)"""
+    p = Path(path)
+    ext = p.suffix.lower()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")
-        try:
-            detail = json.loads(body).get("detail", body)
-        except Exception:
-            detail = body
-        raise RuntimeError(f"HTTP {e.code}: {detail}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Sem ligação ao servidor: {e.reason}")
-
-
-def stream_chat(cfg: dict, messages: list, emit, cancel: threading.Event) -> None:
-    url = cfg["server"] + "/v1/chat/completions"
-    base = {"messages": messages, "temperature": cfg["temperature"]}
-    got_text = False
-    server_error = None
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps({**base, "stream": True}).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            for raw in resp:
-                if cancel.is_set():
-                    emit("done", None)
-                    return
-                for kind, value in parse_sse_line(raw.decode("utf-8", "replace")):
-                    if kind == "delta":
-                        got_text = True
-                        emit("delta", value)
-                    elif kind == "model":
-                        emit("model", value)
-                    elif kind == "error":
-                        server_error = value
-                    elif kind == "done":
-                        if server_error and not got_text:
-                            emit("error", server_error)
-                        else:
-                            emit("done", None)
-                        return
-        if got_text:
-            emit("done", None)
-            return
-        if server_error:
-            emit("error", server_error)
-            return
-    except Exception as e:
-        if got_text:
-            emit("error", f"Ligação interrompida: {e}")
-            return
-    if cancel.is_set():
-        emit("done", None)
-        return
-    try:
-        res = http_json(url, base, timeout=120)
-        text = res["choices"][0]["message"]["content"] or ""
-        if res.get("model"):
-            emit("model", str(res["model"]))
-        emit("delta", text)
-        emit("done", None)
-    except Exception as e:
-        emit("error", str(e))
-
-
-def make_bar(pct: float, width: int = 16) -> str:
-    filled = max(0, min(width, int(round((pct / 100.0) * width))))
-    return "█" * filled + "░" * (width - filled)
-
-
-# =====================================================================
-# INTERFACE GRÁFICA COMPLETA
-# =====================================================================
-
-TOKEN_BAR_W = 130
-
-
-def to_int(value, default: int = 0) -> int:
-    try:
-        return int(float(value))
-    except Exception:
-        return default
-
-
-def fmt_tokens(n) -> str:
-    n = to_int(n, -1)
-    if n < 0:
-        return "—"
-    if n < 1000:
-        return str(n)
-    if n < 1_000_000:
-        return f"{n / 1000:.1f}k".replace(".0k", "k")
-    return f"{n / 1_000_000:.2f}M".replace(".00M", "M")
-
-
-def parse_token_amount(text: str) -> int:
-    """'200000', '200k', '1.5m' -> inteiro. Vazio / 0 / 'sem' -> 0 (sem limite). Lança ValueError se inválido."""
-    t = (text or "").strip().lower().replace(" ", "").replace("_", "")
-    if t in ("", "0", "sem", "semlimite", "ilimitado", "off", "-"):
-        return 0
-    mult = 1
-    if t.endswith("k"):
-        mult, t = 1000, t[:-1]
-    elif t.endswith("m"):
-        mult, t = 1_000_000, t[:-1]
-    value = float(t.replace(",", ".")) * mult
-    if value < 0:
-        raise ValueError("negativo")
-    return int(value)
-
-
-class GoisWindow:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.cfg = load_config()
-        self.history = []
-        self.knowledge_items = load_json_file(LOCAL_KNOWLEDGE_FILE, [])
-        if not isinstance(self.knowledge_items, list):
-            self.knowledge_items = []
-        self.skills_items = load_json_file(LOCAL_SKILLS_FILE, [])
-        if not isinstance(self.skills_items, list):
-            self.skills_items = []
-
-        self.server_state = {
-            "classroom_mode": True,
-            "learning_now": False,
-            "current_topic": "A sincronizar...",
-            "current_teacher": "Rotação Automática",
-            "last_learned_title": "",
-            "last_teacher": "",
-            "active_categories": list(DEFAULT_CATEGORIES),
-            "providers_with_key": [],
-            "comparison": {},
-        }
-
-        self.ui_q = queue.Queue()
-        self.cancel = threading.Event()
-        self.streaming = False
-        self.learning_busy = False
-        self.reply_buf = []
-        self.reply_model = ""
-        self.got_token = False
-        self.cp_counter = 0
-        self.last_user_text = ""
-        self.current_tab = "chat"
-        self.limit_push_pending = False
-
-        root.title(APP_NAME)
-        root.geometry("1140x760")
-        root.minsize(840, 540)
-        root.configure(bg=THEME["bg"])
-
-        self.build_ui()
-        self.bind_keys()
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        saved = load_json_file(SESSION_FILE, [])
-        if isinstance(saved, list):
-            self.history = [
-                m for m in saved
-                if isinstance(m, dict) and m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
-            ]
-        self.render_history()
-        self.refresh_knowledge_list()
-        self.poll()
-        self.initial_connect()
-        self.schedule_classroom_refresh()
-
-    # ---------- componentes visuais ----------
-    def make_button(self, parent, text, command, kind="default", padx=12, pady=5):
-        T = THEME
-        if kind == "primary":
-            bg, hover = T["accent"], "#2ea043"
-        elif kind == "blue":
-            bg, hover = T["accent_blue"], "#388bfd"
-        elif kind == "danger":
-            bg, hover = "#da3633", "#f85149"
+        if ext == ".docx":
+            ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            with zipfile.ZipFile(p) as z:
+                root = ET.fromstring(z.read("word/document.xml"))
+            text = "\n".join("".join(t.text or "" for t in para.iter(ns + "t")) for para in root.iter(ns + "p"))
+        elif ext in BLOCKED_EXT:
+            return None, f"Tipo {ext} não suportado (só texto, código e .docx)."
         else:
-            bg, hover = T["btn"], T["btn_hover"]
-        b = tk.Button(
-            parent, text=text, command=command, bg=bg, fg=T["fg"],
-            activebackground=hover, activeforeground=T["fg"],
-            relief="flat", bd=0, padx=padx, pady=pady, font=FONT_UI,
-            cursor="hand2", highlightthickness=0,
-        )
-        b._base_bg = bg
-        b._hover_bg = hover
-        b.bind("<Enter>", lambda e: b.configure(bg=b._hover_bg))
-        b.bind("<Leave>", lambda e: b.configure(bg=b._base_bg))
-        return b
-
-    def configure_markdown_tags(self, widget: tk.Text):
-        T = THEME
-        widget.tag_config("who_user", foreground=T["user"], font=FONT_UI_BOLD, spacing1=10)
-        widget.tag_config("who_bot", foreground=T["bot"], font=FONT_UI_BOLD, spacing1=10)
-        widget.tag_config("sys", foreground=T["muted"], font=("Segoe UI", 9, "italic"))
-        widget.tag_config("err", foreground=T["err"], font=FONT_UI)
-        widget.tag_config("bold", font=FONT_UI_BOLD)
-        widget.tag_config("icode", font=FONT_CODE, background=T["code_bg"], foreground="#ffa657")
-        widget.tag_config("h1", font=("Segoe UI", 14, "bold"), foreground=T["bot"], spacing1=8, spacing3=4)
-        widget.tag_config("h2", font=("Segoe UI", 12, "bold"), foreground=T["user"], spacing1=6, spacing3=2)
-        widget.tag_config("h3", font=("Segoe UI", 11, "bold"), spacing1=4)
-        widget.tag_config("li", lmargin1=18, lmargin2=32)
-        widget.tag_config("code", font=FONT_CODE, background=T["code_bg"], lmargin1=14, lmargin2=14, rmargin=10)
-        widget.tag_config("code_head", font=("Segoe UI", 8), foreground=T["muted"], background=T["code_bg"], lmargin1=14, spacing1=6)
-        widget.tag_config("copy", font=("Segoe UI", 8, "underline"), foreground=T["user"], background=T["code_bg"])
-
-    def build_ui(self):
-        T = THEME
-        top = tk.Frame(self.root, bg=T["panel"])
-        top.pack(fill="x")
-
-        brand = tk.Frame(top, bg=T["panel"])
-        brand.pack(side="left", padx=(12, 8), pady=8)
-        tk.Label(brand, text="●", bg=T["panel"], fg=T["bot"], font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0, 5))
-        tk.Label(brand, text="gois.v1", bg=T["panel"], fg=T["fg"], font=("Segoe UI", 12, "bold")).pack(side="left")
-
-        nav = tk.Frame(top, bg=T["panel"])
-        nav.pack(side="left", padx=4, pady=6)
-        self.tab_btns = {}
-        tabs = [
-            ("chat", "💬 Chat"),
-            ("comparison", "📊 Comparação % (Gemini & DeepSeek)"),
-            ("classroom", "🏫 Sala de Aula (16 Categorias)"),
-            ("skills", "🧠 Skills & Chaves API"),
-        ]
-        for key, label in tabs:
-            btn = tk.Button(
-                nav, text=label, command=lambda k=key: self.switch_tab(k),
-                bg=T["accent_blue"] if key == "chat" else T["btn"],
-                fg=T["fg"], activebackground=T["btn_hover"], activeforeground=T["fg"],
-                relief="flat", bd=0, padx=11, pady=5, font=FONT_UI_BOLD if key == "chat" else FONT_UI,
-                cursor="hand2", highlightthickness=0,
-            )
-            btn.pack(side="left", padx=2)
-            self.tab_btns[key] = btn
-
-        self.status = tk.Label(top, text="A ligar ao servidor...", bg=T["panel"], fg=T["muted"], font=FONT_SMALL, anchor="w")
-        self.status.pack(side="left", fill="x", expand=True, padx=8)
-
-        for text, cmd in (("Definições", self.open_settings), ("☁️ Sincronizar", self.sync), ("📱 App goisAI", self.open_user_app)):
-            self.make_button(top, text, cmd, kind="blue" if "goisAI" in text else "default", padx=10, pady=4).pack(side="right", padx=3, pady=6)
-
-        tk.Frame(self.root, bg=T["border"], height=1).pack(fill="x")
-        self.build_tokens_bar()
-        tk.Frame(self.root, bg=T["border"], height=1).pack(fill="x")
-
-        self.views_host = tk.Frame(self.root, bg=T["bg"])
-        self.views_host.pack(fill="both", expand=True)
-
-        self.view_chat = tk.Frame(self.views_host, bg=T["bg"])
-        self.view_comparison = tk.Frame(self.views_host, bg=T["bg"])
-        self.view_classroom = tk.Frame(self.views_host, bg=T["bg"])
-        self.view_skills = tk.Frame(self.views_host, bg=T["bg"])
-
-        self.build_chat_view(self.view_chat)
-        self.build_comparison_view(self.view_comparison)
-        self.build_classroom_view(self.view_classroom)
-        self.build_skills_view(self.view_skills)
-
-        self.view_chat.pack(fill="both", expand=True)
-
-    # ---------- VISTA 1: CHAT ----------
-    def build_chat_view(self, parent: tk.Frame):
-        T = THEME
-        sub = tk.Frame(parent, bg=T["panel_alt"])
-        sub.pack(fill="x")
-        self.chat_classroom_banner = tk.Label(
-            sub,
-            text="📊 A carregar comparação ao vivo gois.v1 vs Gemini & DeepSeek...",
-            bg=T["panel_alt"], fg=T["muted"], font=FONT_SMALL, anchor="w", cursor="hand2"
-        )
-        self.chat_classroom_banner.pack(side="left", padx=14, pady=5, fill="x", expand=True)
-        self.chat_classroom_banner.bind("<Button-1>", lambda e: self.switch_tab("comparison"))
-
-        self.make_button(sub, "Nova conversa", self.new_chat, padx=10, pady=3).pack(side="right", padx=6, pady=4)
-        self.make_button(sub, "Exportar Chat", self.export, padx=10, pady=3).pack(side="right", padx=2, pady=4)
-        tk.Frame(parent, bg=T["border"], height=1).pack(fill="x")
-
-        body = tk.Frame(parent, bg=T["bg"])
-        body.pack(fill="both", expand=True)
-        self.scroll = tk.Scrollbar(body, orient="vertical")
-        self.scroll.pack(side="right", fill="y")
-        self.log = tk.Text(
-            body, wrap="word", state="disabled", bg=T["bg"], fg=T["fg"], bd=0, relief="flat",
-            font=FONT_UI, padx=18, pady=18, insertbackground=T["fg"], spacing1=2, spacing3=4,
-            selectbackground="#264f78", highlightthickness=0, yscrollcommand=self.scroll.set,
-        )
-        self.log.pack(side="left", fill="both", expand=True)
-        self.scroll.config(command=self.log.yview)
-        self.configure_markdown_tags(self.log)
-
-        self.menu = tk.Menu(self.root, tearoff=0)
-        self.menu.add_command(label="Copiar seleção", command=self.copy_selection)
-        self.menu.add_command(label="Copiar última resposta", command=self.copy_last_reply)
-        self.log.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
-
-        tk.Frame(parent, bg=T["border"], height=1).pack(fill="x")
-        bottom = tk.Frame(parent, bg=T["panel"])
-        bottom.pack(fill="x")
-        inner = tk.Frame(bottom, bg=T["panel"])
-        inner.pack(fill="x", padx=12, pady=10)
-        self.entry = tk.Text(
-            inner, height=3, wrap="word", bg=T["bg"], fg=T["fg"], insertbackground=T["fg"],
-            relief="flat", bd=0, font=FONT_UI, padx=10, pady=8, highlightthickness=1,
-            highlightbackground=T["border"], highlightcolor=T["user"],
-        )
-        self.entry.pack(side="left", fill="x", expand=True)
-        buttons = tk.Frame(inner, bg=T["panel"])
-        buttons.pack(side="right", padx=(10, 0))
-        self.send_btn = self.make_button(buttons, "Enviar", self.send, kind="primary")
-        self.send_btn.pack(fill="x")
-        self.stop_btn = self.make_button(buttons, "Parar", self.stop, kind="danger")
-        self.regen_btn = self.make_button(buttons, "Regenerar", self.regenerate)
-        self.regen_btn.pack(fill="x", pady=(6, 0))
-        self.entry.focus_set()
-
-    # ---------- VISTA 2: COMPARAÇÃO REAL EM % (gois.v1 vs GEMINI vs DEEPSEEK) ----------
-    def build_comparison_view(self, parent: tk.Frame):
-        T = THEME
-        top_card = tk.Frame(parent, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
-        top_card.pack(fill="x", padx=14, pady=(12, 8))
-
-        head = tk.Frame(top_card, bg=T["panel"])
-        head.pack(fill="x", padx=14, pady=(10, 6))
-        tk.Label(
-            head,
-            text="📊 Comparação Real Total em % — gois.v1 vs Google Gemini vs DeepSeek (16 Categorias)",
-            bg=T["panel"], fg=T["fg"], font=("Segoe UI", 11, "bold"),
-        ).pack(side="left")
-        self.make_button(
-            head, "ⓘ Como Ler os Resultados (Passo a Passo)", self.open_comparison_info, kind="blue", padx=10, pady=4
-        ).pack(side="left", padx=(10, 0))
-
-        self.btn_run_bench = self.make_button(
-            head, "⚔️ Executar Desafio Benchmark Ao Vivo", self.run_benchmark_ui, kind="primary", padx=12, pady=4
-        )
-        self.btn_run_bench.pack(side="right", padx=(6, 0))
-        self.btn_study_selected = self.make_button(
-            head, "⚡ Estudar Categoria Selecionada Agora", self.study_selected_comp_category, kind="blue", padx=12, pady=4
-        )
-        self.btn_study_selected.pack(side="right", padx=4)
-        self.make_button(head, "🔄 Atualizar Live", self.refresh_classroom_from_server, padx=10, pady=4).pack(side="right", padx=4)
-
-        kpis = tk.Frame(top_card, bg=T["panel"])
-        kpis.pack(fill="x", padx=14, pady=(4, 10))
-        for i in range(4):
-            kpis.columnconfigure(i, weight=1)
-
-        def make_kpi(col, title, color):
-            f = tk.Frame(kpis, bg=T["bg"], highlightthickness=1, highlightbackground=T["border"], padx=12, pady=8)
-            f.grid(row=0, column=col, sticky="ew", padx=4)
-            tk.Label(f, text=title, bg=T["bg"], fg=T["muted"], font=("Segoe UI", 8, "bold"), anchor="w").pack(fill="x")
-            val = tk.Label(f, text="—%", bg=T["bg"], fg=color, font=("Segoe UI", 16, "bold"), anchor="w")
-            val.pack(fill="x", pady=2)
-            sub = tk.Label(f, text="A calcular...", bg=T["bg"], fg=T["muted"], font=("Segoe UI", 8), anchor="w")
-            sub.pack(fill="x")
-            return val, sub
-
-        self.kpi_gois_val, self.kpi_gois_sub = make_kpi(0, "🟢 DOMÍNIO GLOBAL gois.v1", T["bot"])
-        self.kpi_gem_val, self.kpi_gem_sub = make_kpi(1, "🔵 REFERÊNCIA GOOGLE GEMINI", T["user"])
-        self.kpi_ds_val, self.kpi_ds_sub = make_kpi(2, "🟣 REFERÊNCIA DEEPSEEK V3/R1", T["purple"])
-        self.kpi_cov_val, self.kpi_cov_sub = make_kpi(3, "📚 COBERTURA DAS 16 CATEGORIAS", T["fg"])
-
-        self.lbl_comp_feedback = tk.Label(
-            top_card,
-            text="Seleciona qualquer uma das 16 categorias abaixo e clica em '⚡ Estudar Categoria Selecionada Agora' para o gois.v1 aprender e subir a % em tempo real.",
-            bg=T["panel"], fg=T["warn"], font=FONT_SMALL, anchor="w",
-        )
-        self.lbl_comp_feedback.pack(fill="x", padx=18, pady=(0, 8))
-
-        body = tk.Frame(parent, bg=T["bg"])
-        body.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-
-        left = tk.Frame(body, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-
-        lwrap = tk.Frame(left, bg=T["bg"])
-        lwrap.pack(fill="both", expand=True, padx=6, pady=6)
-        cscroll = tk.Scrollbar(lwrap, orient="vertical")
-        cscroll.pack(side="right", fill="y")
-
-        list_col = tk.Frame(lwrap, bg=T["bg"])
-        list_col.pack(side="left", fill="both", expand=True)
-
-        self.comp_header_box = tk.Listbox(
-            list_col, height=1, bg=T["panel_alt"], fg=T["user"],
-            selectbackground=T["panel_alt"], selectforeground=T["user"],
-            bd=0, relief="flat", font=("Consolas", 9), highlightthickness=0,
-            activestyle="none", exportselection=False, takefocus=0,
-        )
-        self.comp_header_box.pack(side="top", fill="x")
-        header_line = (
-            f" {'Categoria (16 Domínios Gemini & DeepSeek)':<48} │ "
-            f"{'gois.v1':>7} │ {'Gemini':>7} │ {'DeepSeek':>8} │ {'Lições':>6} │ {'Paridade':>8}"
-        )
-        self.comp_header_box.insert("end", header_line)
-        self.comp_header_box.bind("<<ListboxSelect>>", lambda _e: self.comp_header_box.selection_clear(0, "end"))
-
-        tk.Frame(list_col, bg=T["border"], height=1).pack(side="top", fill="x")
-
-        self.comp_listbox = tk.Listbox(
-            list_col, bg=T["bg"], fg=T["fg"], selectbackground=T["accent_blue"], selectforeground="#ffffff",
-            bd=0, relief="flat", font=("Consolas", 9), highlightthickness=0, activestyle="none",
-            exportselection=False, yscrollcommand=cscroll.set,
-        )
-        self.comp_listbox.pack(side="top", fill="both", expand=True)
-        cscroll.config(command=self.comp_listbox.yview)
-        self.comp_listbox.bind("<<ListboxSelect>>", self.on_select_comp_category)
-
-        right = tk.Frame(body, bg=T["panel"], width=360, highlightthickness=1, highlightbackground=T["border"])
-        right.pack(side="left", fill="y")
-        right.pack_propagate(False)
-
-        tk.Label(
-            right, text="🔬 Raio-X da Categoria Selecionada",
-            bg=T["panel"], fg=T["user"], font=FONT_UI_BOLD, anchor="w",
-        ).pack(fill="x", padx=12, pady=(10, 6))
-
-        self.comp_detail = tk.Text(
-            right, wrap="word", state="disabled", bg=T["bg"], fg=T["fg"], bd=0, relief="flat",
-            font=FONT_UI, padx=12, pady=10, spacing1=3, spacing3=3, highlightthickness=0,
-        )
-        self.comp_detail.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.configure_markdown_tags(self.comp_detail)
-
-    # ---------- VISTA 3: SALA DE AULA (16 CATEGORIAS) ----------
-    def build_classroom_view(self, parent: tk.Frame):
-        T = THEME
-        ctrl_card = tk.Frame(parent, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
-        ctrl_card.pack(fill="x", padx=14, pady=(12, 8))
-
-        row1 = tk.Frame(ctrl_card, bg=T["panel"])
-        row1.pack(fill="x", padx=14, pady=(10, 4))
-        tk.Label(
-            row1, text="🏫 Sala de Aula Autónoma — Estudo Integral das 16 Categorias (Gemini & DeepSeek)",
-            bg=T["panel"], fg=T["bot"], font=("Segoe UI", 11, "bold"),
-        ).pack(side="left")
-
-        self.btn_toggle_classroom = self.make_button(
-            row1, "Sala de Aula: a verificar...", self.toggle_classroom, kind="default", padx=12, pady=4
-        )
-        self.btn_toggle_classroom.pack(side="right", padx=(6, 0))
-        self.make_button(row1, "🔄 Atualizar", self.refresh_classroom_from_server, padx=10, pady=4).pack(side="right", padx=4)
-        self.make_button(row1, "⬇️ Exportar Tudo (.md)", self.export_all_knowledge, padx=10, pady=4).pack(side="right", padx=4)
-
-        info_box = tk.Frame(ctrl_card, bg=T["bg"], highlightthickness=1, highlightbackground=T["border"])
-        info_box.pack(fill="x", padx=14, pady=6)
-
-        self.lbl_cls_mode = tk.Label(info_box, text="Estado: A verificar...", bg=T["bg"], fg=T["bot"], font=FONT_UI_BOLD, anchor="w")
-        self.lbl_cls_mode.pack(fill="x", padx=10, pady=(6, 2))
-
-        self.lbl_cls_models = tk.Label(
-            info_box,
-            text="Modelos Professores Reais: DeepSeek V3 · Google Gemini · GPT-OSS 120B (Groq) · Mistral",
-            bg=T["bg"], fg=T["user"], font=FONT_SMALL, anchor="w",
-        )
-        self.lbl_cls_models.pack(fill="x", padx=10, pady=2)
-
-        self.lbl_cls_topic = tk.Label(info_box, text="Tópico Atual / Último Estudo: —", bg=T["bg"], fg=T["fg"], font=FONT_SMALL, anchor="w")
-        self.lbl_cls_topic.pack(fill="x", padx=10, pady=(2, 6))
-
-        learn_bar = tk.Frame(ctrl_card, bg=T["panel"])
-        learn_bar.pack(fill="x", padx=14, pady=(4, 10))
-
-        tk.Label(learn_bar, text="Modelo Professor:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).pack(side="left")
-        self.cmb_teacher = ttk.Combobox(
-            learn_bar, values=["auto (Rotação)", "DeepSeek", "Gemini", "Groq", "Mistral"], state="readonly", width=15
-        )
-        self.cmb_teacher.set("auto (Rotação)")
-        self.cmb_teacher.pack(side="left", padx=(4, 10))
-
-        tk.Label(learn_bar, text="Categoria (16):", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).pack(side="left")
-        self.cmb_category = ttk.Combobox(learn_bar, values=DEFAULT_CATEGORIES, state="readonly", width=34)
-        self.cmb_category.set(DEFAULT_CATEGORIES[0])
-        self.cmb_category.pack(side="left", padx=(4, 10))
-
-        tk.Label(learn_bar, text="Tópico (opcional):", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).pack(side="left")
-        self.ent_custom_topic = tk.Entry(
-            learn_bar, bg=T["bg"], fg=T["fg"], insertbackground=T["fg"], relief="flat",
-            font=FONT_UI, highlightthickness=1, highlightbackground=T["border"], highlightcolor=T["user"],
-        )
-        self.ent_custom_topic.pack(side="left", fill="x", expand=True, padx=6, ipady=3)
-
-        self.btn_learn_now = self.make_button(
-            learn_bar, "⚡ Aprender Agora com Modelo Real", self.learn_now, kind="blue", padx=12, pady=4
-        )
-        self.btn_learn_now.pack(side="right")
-
-        split = tk.Frame(parent, bg=T["bg"])
-        split.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-
-        left = tk.Frame(split, bg=T["panel"], width=390, highlightthickness=1, highlightbackground=T["border"])
-        left.pack(side="left", fill="y", padx=(0, 8))
-        left.pack_propagate(False)
-
-        lh = tk.Frame(left, bg=T["panel"])
-        lh.pack(fill="x", padx=10, pady=8)
-        self.lbl_lessons_count = tk.Label(
-            lh, text="📚 Tudo o que já aprendeu (0 lições)", bg=T["panel"], fg=T["fg"], font=FONT_UI_BOLD, anchor="w"
-        )
-        self.lbl_lessons_count.pack(side="left")
-
-        list_wrap = tk.Frame(left, bg=T["bg"])
-        list_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        lscroll = tk.Scrollbar(list_wrap, orient="vertical")
-        lscroll.pack(side="right", fill="y")
-        self.lessons_list = tk.Listbox(
-            list_wrap, bg=T["bg"], fg=T["fg"], selectbackground=T["accent_blue"], selectforeground="#ffffff",
-            bd=0, relief="flat", font=FONT_SMALL, highlightthickness=0, activestyle="none",
-            yscrollcommand=lscroll.set,
-        )
-        self.lessons_list.pack(side="left", fill="both", expand=True)
-        lscroll.config(command=self.lessons_list.yview)
-        self.lessons_list.bind("<<ListboxSelect>>", self.on_select_lesson)
-
-        right = tk.Frame(split, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
-        right.pack(side="left", fill="both", expand=True)
-
-        rh = tk.Frame(right, bg=T["panel"])
-        rh.pack(fill="x", padx=12, pady=8)
-        self.lbl_lesson_header = tk.Label(
-            rh, text="Seleciona uma lição à esquerda ou clica em '⚡ Aprender Agora com Modelo Real'",
-            bg=T["panel"], fg=T["user"], font=FONT_UI_BOLD, anchor="w",
-        )
-        self.lbl_lesson_header.pack(side="left", fill="x", expand=True)
-
-        rbody = tk.Frame(right, bg=T["bg"])
-        rbody.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        rscroll = tk.Scrollbar(rbody, orient="vertical")
-        rscroll.pack(side="right", fill="y")
-        self.lesson_viewer = tk.Text(
-            rbody, wrap="word", state="disabled", bg=T["bg"], fg=T["fg"], bd=0, relief="flat",
-            font=FONT_UI, padx=14, pady=10, spacing1=2, spacing3=2, highlightthickness=0,
-            yscrollcommand=rscroll.set,
-        )
-        self.lesson_viewer.pack(side="left", fill="both", expand=True)
-        rscroll.config(command=self.lesson_viewer.yview)
-        self.configure_markdown_tags(self.lesson_viewer)
-
-    # ---------- VISTA 4: SKILLS & CHAVES API ----------
-    def build_skills_view(self, parent: tk.Frame):
-        T = THEME
-        cols = tk.Frame(parent, bg=T["bg"])
-        cols.pack(fill="both", expand=True, padx=14, pady=12)
-
-        left = tk.Frame(cols, bg=T["panel"], highlightthickness=1, highlightbackground=T["border"])
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-
-        tk.Label(
-            left, text="🧠 Ensinar Nova Skill ou Diretriz ao gois.v1",
-            bg=T["panel"], fg=T["bot"], font=FONT_UI_BOLD, anchor="w",
-        ).pack(fill="x", padx=14, pady=(12, 6))
-
-        form = tk.Frame(left, bg=T["panel"])
-        form.pack(fill="x", padx=14, pady=4)
-        tk.Label(form, text="Tipo:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).grid(row=0, column=0, sticky="w", pady=3)
-        self.cmb_skill_type = ttk.Combobox(form, values=["SKILL", "DIRECTRIZ"], state="readonly", width=16)
-        self.cmb_skill_type.set("SKILL")
-        self.cmb_skill_type.grid(row=0, column=1, sticky="w", padx=6, pady=3)
-
-        tk.Label(form, text="Título:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL).grid(row=1, column=0, sticky="w", pady=3)
-        self.ent_skill_title = tk.Entry(
-            form, bg=T["bg"], fg=T["fg"], insertbackground=T["fg"], relief="flat", font=FONT_UI,
-            highlightthickness=1, highlightbackground=T["border"],
-        )
-        self.ent_skill_title.grid(row=1, column=1, sticky="ew", padx=6, pady=3, ipady=3)
-        form.columnconfigure(1, weight=1)
-
-        tk.Label(left, text="Conteúdo / Regra Técnica:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL, anchor="w").pack(fill="x", padx=14, pady=(4, 2))
-        self.txt_skill_content = tk.Text(
-            left, height=4, wrap="word", bg=T["bg"], fg=T["fg"], insertbackground=T["fg"],
-            relief="flat", font=FONT_UI, padx=8, pady=6, highlightthickness=1, highlightbackground=T["border"],
-        )
-        self.txt_skill_content.pack(fill="x", padx=14, pady=4)
-
-        btn_row = tk.Frame(left, bg=T["panel"])
-        btn_row.pack(fill="x", padx=14, pady=6)
-        self.make_button(btn_row, "+ Guardar Skill & Enviar para Render", self.add_skill_ui, kind="primary").pack(side="left")
-        self.make_button(btn_row, "Remover Selecionada", self.delete_selected_skill, kind="danger").pack(side="right")
-
-        tk.Label(
-            left, text="Skills & Diretrizes Ativas no Núcleo:",
-            bg=T["panel"], fg=T["fg"], font=FONT_UI_BOLD, anchor="w",
-        ).pack(fill="x", padx=14, pady=(8, 4))
-
-        s_wrap = tk.Frame(left, bg=T["bg"])
-        s_wrap.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-        s_scroll = tk.Scrollbar(s_wrap, orient="vertical")
-        s_scroll.pack(side="right", fill="y")
-        self.skills_listbox = tk.Listbox(
-            s_wrap, bg=T["bg"], fg=T["fg"], selectbackground=T["accent_blue"], bd=0, relief="flat",
-            font=FONT_SMALL, highlightthickness=0, yscrollcommand=s_scroll.set,
-        )
-        self.skills_listbox.pack(side="left", fill="both", expand=True)
-        s_scroll.config(command=self.skills_listbox.yview)
-
-        right = tk.Frame(cols, bg=T["panel"], width=380, highlightthickness=1, highlightbackground=T["border"])
-        right.pack(side="left", fill="y")
-        right.pack_propagate(False)
-
-        tk.Label(
-            right, text="🔑 Fornecedores e Chaves API (Modelos Reais)",
-            bg=T["panel"], fg=T["user"], font=FONT_UI_BOLD, anchor="w",
-        ).pack(fill="x", padx=14, pady=(12, 6))
-
-        self.lbl_keys_status = tk.Label(
-            right, text="A verificar estado das chaves no servidor...",
-            bg=T["bg"], fg=T["fg"], font=FONT_SMALL, justify="left", anchor="w", padx=10, pady=10,
-            wraplength=340,
-        )
-        self.lbl_keys_status.pack(fill="x", padx=14, pady=6)
-
-        tk.Label(right, text="Fornecedor:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL, anchor="w").pack(fill="x", padx=14, pady=(8, 2))
-        self.cmb_key_provider = ttk.Combobox(right, values=["OpenRouter", "Groq", "Mistral"], state="readonly")
-        self.cmb_key_provider.set("OpenRouter")
-        self.cmb_key_provider.pack(fill="x", padx=14, pady=2)
-
-        tk.Label(right, text="Nova Chave API:", bg=T["panel"], fg=T["muted"], font=FONT_SMALL, anchor="w").pack(fill="x", padx=14, pady=(8, 2))
-        self.ent_api_key = tk.Entry(
-            right, bg=T["bg"], fg=T["fg"], insertbackground=T["fg"], show="•", relief="flat",
-            font=FONT_UI, highlightthickness=1, highlightbackground=T["border"],
-        )
-        self.ent_api_key.pack(fill="x", padx=14, pady=2, ipady=4)
-
-        self.make_button(
-            right, "☁️ Enviar Chave para o Servidor", self.send_api_key_ui, kind="blue"
-        ).pack(fill="x", padx=14, pady=(12, 4))
-
-        self.make_button(
-            right, "🗑️ Remover Chave do Fornecedor", self.remove_api_key_ui, kind="danger"
-        ).pack(fill="x", padx=14, pady=(4, 12))
-
-        tk.Label(
-            right,
-            text=(
-                "Nota:\n"
-                "• Com a sincronização do Render ligada, enviar ou remover uma chave aqui grava no Environment do Render (permanente).\n"
-                "• Sem ela, a chave fica só em memória no servidor e perde-se ao reiniciar.\n"
-                "• O gois.v1 usa estas chaves tanto para o Chat como para estudar todas as 16 categorias de Gemini & DeepSeek."
-            ),
-            bg=T["panel"], fg=T["muted"], font=FONT_SMALL, wraplength=340, justify="left", anchor="w",
-        ).pack(fill="x", padx=14, pady=8)
-
-    # ---------- navegação entre abas ----------
-    def switch_tab(self, tab_key: str):
-        T = THEME
-        self.current_tab = tab_key
-        for k, btn in self.tab_btns.items():
-            btn.configure(
-                bg=T["accent_blue"] if k == tab_key else T["btn"],
-                font=FONT_UI_BOLD if k == tab_key else FONT_UI,
-            )
-        for frame in (self.view_chat, self.view_comparison, self.view_classroom, self.view_skills):
-            frame.pack_forget()
-        if tab_key == "chat":
-            self.view_chat.pack(fill="both", expand=True)
-            self.entry.focus_set()
-        elif tab_key == "comparison":
-            self.view_comparison.pack(fill="both", expand=True)
-            self.refresh_classroom_from_server()
-        elif tab_key == "classroom":
-            self.view_classroom.pack(fill="both", expand=True)
-            self.refresh_classroom_from_server()
-        elif tab_key == "skills":
-            self.view_skills.pack(fill="both", expand=True)
-            self.refresh_skills_from_server()
-
-    def open_user_app(self):
-        import webbrowser
-        url = self.cfg["server"].rstrip("/")
-        self.copy_text(url)
-        webbrowser.open(url)
-        self.set_status(f"Link da App Pública goisAI copiado e aberto: {url}")
-
-    def bind_keys(self):
-        self.entry.bind("<Return>", self.on_enter)
-        self.root.bind("<Control-n>", lambda e: self.new_chat())
-        self.root.bind("<Escape>", lambda e: self.stop())
-
-    # ---------- utilitários de interface ----------
-    @contextmanager
-    def editable(self, widget: tk.Text = None):
-        w = widget or self.log
-        w.configure(state="normal")
+            raw = p.read_bytes()[: MAX_FILE * 2]
+            if b"\x00" in raw[:4096]:
+                return None, "Parece um ficheiro binário."
+            text = raw.decode("utf-8", errors="ignore")
+    except Exception as e:
+        return None, f"Não foi possível ler: {e}"
+    note = ""
+    if len(text) > MAX_FILE:
+        text, note = text[:MAX_FILE], f"cortado aos primeiros {MAX_FILE // 1000} KB"
+    return text, note
+
+
+class ApiError(Exception):
+    def __init__(self, msg, code=0):
+        super().__init__(msg)
+        self.code = code
+
+
+class Api:
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+
+    def call(self, method: str, path: str, body=None, timeout: float = 30):
+        url = self.cfg["server"].rstrip("/") + path
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+        token = (self.cfg.get("token") or "").encode("latin-1", "ignore").decode("latin-1")
+        headers = {"Content-Type": "application/json", "Accept": "application/json", "X-Admin-Token": token,
+                   "User-Agent": "gois-desktop/2.2"}
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            yield
-        finally:
-            w.configure(state="disabled")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = json.loads(e.read().decode("utf-8", "replace")).get("detail", "")
+            except Exception:
+                pass
+            if e.code == 503 and "ADMIN_TOKEN" in (detail or ""):
+                detail = "o servidor não tem ADMIN_TOKEN (Render > Environment)"
+            elif e.code == 401:
+                detail = "token de administrador não coincide com o do servidor"
+            raise ApiError(f"HTTP {e.code}: {detail or e.reason}", e.code) from None
+        except Exception as e:
+            raise ApiError(f"Sem ligação ao servidor ({e})") from None
+        try:
+            return json.loads(raw) if raw else {}
+        except Exception:
+            raise ApiError("Resposta inválida do servidor.") from None
 
-    def set_status(self, text: str, error: bool = False):
-        self.status.config(text=text, fg=THEME["err"] if error else THEME["muted"])
 
-    def poll(self):
+# --------------------------------------------------------------------------- #
+# Janela principal
+# --------------------------------------------------------------------------- #
+class GoisWindow(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_NAME)
+        self.cfg = self.load_config()
+        set_theme(self.cfg.get("theme", "dark"))
+        self.geometry("1380x840")
+        self.minsize(1200, 700)
+        self.configure(bg=THEME["bg"])
+        self.api = Api(self.cfg)
+        self.sessions = self.load_sessions()
+        self.custom_skills = read_json(LOCAL_SKILLS_FILE, [])
+        self.kb_cache = read_json(KNOWLEDGE_FILE, [])
+        self.current_session_id = None
+        self.attachments = []
+        self.busy = False
+        self.pending_sid = None
+        self.last_error = None
+        self.connected = False
+        self.is_admin = False
+        self.admin_configured = None
+        self._warned_token = False
+        self.use_skills = tk.BooleanVar(value=True)
+        self.hist_filter = tk.StringVar()
+        self.hist_filter.trace_add("write", lambda *_: self.refresh_session_list() if hasattr(self, "hist_list") else None)
+        self.skill_search = tk.StringVar()
+        self.skill_search.trace_add("write", lambda *_: self.refresh_skills() if hasattr(self, "skill_tree") else None)
+        cached = read_json(COMP_CACHE_FILE, {})
+        self.server_settings = cached if isinstance(cached, dict) else {}
+        self.health = {}
+        self.latency_ms = None
+        self.last_live = 0.0
+        self._live_busy = False
+        self._live_after = self._bench_after = None
+        self.auto_bench = tk.BooleanVar(value=False)  # gasta tokens: começa sempre desligado
+        self.live_s = tk.StringVar(value=str(self.cfg.get("live_s", 10)))
+        self.log_lines = []
+        self.sel_cat = None
+        hist = read_json(HISTORY_FILE, [])
+        self.history = hist if isinstance(hist, list) else []
+        self.kb = []
+        self.class_busy = False
+        self._emb = []
+        self._conn_after = None
+        self._poll_after = None
+        self.ui_q = queue.Queue()
+
+        self.setup_styles()
+        self.build_ui()
+        self.init_first_session()
+        self.kb = list(self.kb_cache)  # Sala de Aula mostra já as lições guardadas neste PC, mesmo offline
+        self.update_knowledge_ui()
+        if self.server_settings:
+            self.apply_settings(self.server_settings, cached=True)
+        self.after(300, self.setup_drop)
+        self.after(1000, self.clock_tick)
+        self._live_after = self.after(3000, self.live_tick)
+        self._bench_after = self.after(90_000, self.bench_tick)
+        self.after(100, self.pump)
+        self.after(400, self.first_run_token)
+        if SKILLS_ERROR:
+            self.after(600, lambda: messagebox.showwarning(
+                "Skills integradas", "Não consegui carregar gois_skills.py (tem de estar na mesma pasta que gois_window.py).\n\n"
+                + SKILLS_ERROR, parent=self))
+
+    # ---------------- infraestrutura ----------------
+    def load_config(self):
+        migrate_legacy_data(DATA_DIR)
+        cfg = read_json(CONFIG_FILE, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg.setdefault("server", DEFAULT_SERVER)
+        cfg.setdefault("token", "")
+        return cfg
+
+    def save_config(self):
+        write_json(CONFIG_FILE, self.cfg)
+
+    def pump(self):
+        """Executa no thread da UI o que as threads de fundo pedem (tkinter não é thread-safe)."""
         try:
             while True:
                 self.ui_q.get_nowait()()
         except queue.Empty:
             pass
-        self.root.after(40, self.poll)
+        except Exception:
+            pass
+        self.after(100, self.pump)
 
-    def background(self, fn, done):
-        def worker():
+    def bg(self, work, done=None):
+        def runner():
             try:
-                result, err = fn(), None
+                res, err = work(), None
             except Exception as e:
-                result, err = None, str(e)
-            self.ui_q.put(lambda: done(result, err))
-        threading.Thread(target=worker, daemon=True).start()
+                res, err = None, e
+            if done:
+                self.ui_q.put(lambda: done(res, err))
+        threading.Thread(target=runner, daemon=True).start()
 
-    def on_enter(self, event):
-        if event.state & 0x0001:
-            return None
-        self.send()
-        return "break"
-
-    def copy_text(self, text: str):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.set_status("Copiado para a área de transferência.")
-
-    def copy_selection(self):
+    def flash(self, text, color=None, ms=5000):
         try:
-            self.copy_text(self.log.get("sel.first", "sel.last"))
+            self.flash_lbl.config(text=text, fg=color or THEME["muted"])
+        except tk.TclError:
+            return
+
+        def clear():
+            try:
+                if self.flash_lbl.cget("text") == text:
+                    self.flash_lbl.config(text="")
+            except tk.TclError:
+                pass
+
+        self.after(ms, clear)
+
+    def first_run_token(self):
+        if not self.cfg.get("token"):
+            tok = simpledialog.askstring(
+                "Token de administrador",
+                "Introduz o ADMIN_TOKEN definido no servidor (Render > Environment).\n"
+                "Sem ele o Command Center fica em modo público.",
+                show="•", parent=self)
+            if tok:
+                self.cfg["token"] = tok.strip()
+                self.save_config()
+        self.check_connection()
+
+    # ---------------- estilos ----------------
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TNotebook", background=THEME["bg"], borderwidth=0, tabmargins=[16, 8, 16, 0])
+        style.configure("TNotebook.Tab", background=THEME["panel"], foreground=THEME["muted"],
+                        padding=[16, 9], font=("Segoe UI Semibold", 9), borderwidth=0)
+        style.map("TNotebook.Tab", background=[("selected", THEME["accent_blue"]), ("active", THEME["panel_alt"])],
+                  foreground=[("selected", "#ffffff"), ("active", THEME["fg"])])
+        style.configure("Treeview", background=THEME["panel"], fieldbackground=THEME["panel"],
+                        foreground=THEME["fg"], rowheight=28, borderwidth=0, font=("Segoe UI", 9))
+        style.configure("Treeview.Heading", background=THEME["panel_alt"], foreground=THEME["fg"],
+                        font=("Segoe UI Semibold", 9), borderwidth=0, relief="flat")
+        style.map("Treeview", background=[("selected", THEME["accent_blue"])], foreground=[("selected", "#ffffff")])
+        style.map("Treeview.Heading", background=[("active", THEME["border"])])
+        style.configure("Vertical.TScrollbar", background=THEME["btn"], troughcolor=THEME["bg"], borderwidth=0,
+                        arrowcolor=THEME["muted"])
+        style.configure("TCombobox", fieldbackground=THEME["code_bg"], background=THEME["btn"], foreground=THEME["fg"],
+                        arrowcolor=THEME["fg"], bordercolor=THEME["border"])
+        style.map("TCombobox", fieldbackground=[("readonly", THEME["code_bg"])], foreground=[("readonly", THEME["fg"])])
+        self.option_add("*TCombobox*Listbox.background", THEME["panel"])
+        self.option_add("*TCombobox*Listbox.foreground", THEME["fg"])
+        self.option_add("*TCombobox*Listbox.selectBackground", THEME["accent_blue"])
+
+    def btn(self, parent, text, cmd, color=None, **kw):
+        return tk.Button(parent, text=text, command=cmd, bg=color or THEME["btn"], fg="#ffffff" if color else THEME["fg"],
+                         relief=tk.FLAT, bd=0, highlightthickness=0, activebackground=THEME["accent_blue"],
+                         activeforeground="#ffffff", font=kw.pop("font", ("Segoe UI Semibold", 9)), cursor="hand2",
+                         padx=kw.pop("padx", 12), pady=kw.pop("pady", 5), **kw)
+
+    def card(self, parent, **kw):
+        return tk.Frame(parent, bg=THEME["panel"], highlightbackground=THEME["border"], highlightthickness=1, **kw)
+
+    def kpi_card(self, parent, key, title, color=None, big=False):
+        f = self.card(parent)
+        f.pack(side=tk.LEFT, padx=(0, 8), fill=tk.Y)
+        top = tk.Frame(f, bg=THEME["panel"])
+        top.pack(fill=tk.X, padx=12, pady=(8, 0))
+        if color:
+            tk.Label(top, text="●", fg=color, bg=THEME["panel"], font=("Segoe UI", 10)).pack(side=tk.LEFT)
+        tk.Label(top, text=title, fg=THEME["muted"], bg=THEME["panel"], font=("Segoe UI Semibold", 9)).pack(side=tk.LEFT, padx=(4 if color else 0, 0))
+        val = tk.Label(f, text="—", fg=color or THEME["fg"], bg=THEME["panel"], font=("Segoe UI Semibold", 22 if big else 14))
+        val.pack(anchor=tk.W, padx=12)
+        sub = tk.Label(f, text="", fg=THEME["muted"], bg=THEME["panel"], font=("Segoe UI", 8))
+        sub.pack(anchor=tk.W, padx=12, pady=(0, 8))
+        self.kpi[key] = (val, sub)
+
+    # ---------------- UI base ----------------
+    def build_ui(self):
+        self.kpi = {}
+        header = tk.Frame(self, bg=THEME["panel"], height=54, highlightbackground=THEME["border"], highlightthickness=1)
+        header.pack(side=tk.TOP, fill=tk.X)
+        header.pack_propagate(False)
+        tk.Label(header, text=" g ", bg=THEME["accent"], fg="#ffffff", font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT, padx=(16, 8), pady=10)
+        tk.Label(header, text="gois.v1", bg=THEME["panel"], fg=THEME["fg"], font=("Segoe UI Semibold", 13)).pack(side=tk.LEFT)
+        tk.Label(header, text="Office & Command Center", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=8)
+        self.btn(header, "⚙ Definições", self.open_settings).pack(side=tk.RIGHT, padx=(6, 14), pady=10)
+        self.theme_btn = self.btn(header, "☀ Claro" if THEME["name"] == "dark" else "🌙 Escuro", self.toggle_theme)
+        self.theme_btn.pack(side=tk.RIGHT, padx=6, pady=10)
+        self.status_lbl = tk.Label(header, text="⏳ a ligar…", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI Semibold", 9))
+        self.status_lbl.pack(side=tk.RIGHT, padx=10)
+        self.live_lbl = tk.Label(header, text="● …", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI Semibold", 9))
+        self.live_lbl.pack(side=tk.RIGHT, padx=10)
+        self.flash_lbl = tk.Label(header, text="", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 9))
+        self.flash_lbl.pack(side=tk.RIGHT, padx=10)
+        if sys.platform == "win32":
+            ok = is_windows_admin()
+            tk.Label(header, text="🛡 Administrador" if ok else "⚠ sem Administrador", bg=THEME["panel"],
+                     fg=THEME["bot"] if ok else THEME["warn"], font=("Segoe UI Semibold", 9)).pack(side=tk.RIGHT, padx=10)
+
+        # barra de estado (rodapé)
+        bar = tk.Frame(self, bg=THEME["panel"], highlightbackground=THEME["border"], highlightthickness=1)
+        bar.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Label(bar, text=f"📁 {DATA_DIR}", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=12, pady=3)
+        self.foot_r = tk.Label(bar, text="", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 8))
+        self.foot_r.pack(side=tk.RIGHT, padx=12)
+
+        # totais gerais sempre visíveis
+        strip = tk.Frame(self, bg=THEME["bg"])
+        strip.pack(side=tk.TOP, fill=tk.X, padx=16, pady=(10, 2))
+        self.kpi_card(strip, "gois", "gois.v1 · total geral", series_color("gois"), big=True)
+        self.kpi_card(strip, "gemini", "Gemini · total geral", series_color("gemini"), big=True)
+        self.kpi_card(strip, "deepseek", "DeepSeek · total geral", series_color("deepseek"), big=True)
+        tk.Frame(strip, bg=THEME["border"], width=1).pack(side=tk.LEFT, fill=tk.Y, padx=(2, 10), pady=4)
+        self.kpi_card(strip, "par_gem", "Paridade vs Gemini")
+        self.kpi_card(strip, "par_ds", "Paridade vs DeepSeek")
+        self.kpi_card(strip, "lessons", "Lições")
+        self.kpi_card(strip, "skills", "Skills")
+        self.kpi_card(strip, "tokens", "Tokens hoje")
+
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.tab_chat = tk.Frame(self.notebook, bg=THEME["bg"])
+        self.tab_comp = tk.Frame(self.notebook, bg=THEME["bg"])
+        self.tab_class = tk.Frame(self.notebook, bg=THEME["bg"])
+        self.tab_skills = tk.Frame(self.notebook, bg=THEME["bg"])
+        self.tab_sys = tk.Frame(self.notebook, bg=THEME["bg"])
+        self.notebook.add(self.tab_chat, text="💬 Chat & Histórico")
+        self.notebook.add(self.tab_comp, text="📊 Comparação Live")
+        self.notebook.add(self.tab_class, text="🏫 Sala de Aula")
+        self.notebook.add(self.tab_skills, text="🧠 Skills")
+        self.notebook.add(self.tab_sys, text="🛠 Sistema")
+
+        self.build_chat_tab()
+        self.build_comparison_tab()
+        self.build_classroom_tab()
+        self.build_skills_tab()
+        self.build_system_tab()
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+
+    def toggle_theme(self):
+        name = "light" if THEME["name"] == "dark" else "dark"
+        self.cfg["theme"] = name
+        self.save_config()
+        set_theme(name)
+        self.rebuild_ui()
+
+    def rebuild_ui(self):
+        """Recria a interface com o tema novo, mantendo o rascunho, o separador e todos os dados."""
+        draft, tab = "", 0
+        try:
+            draft = self.msg_entry.get("1.0", "end-1c")
+            tab = self.notebook.index(self.notebook.select())
+        except Exception:
+            pass
+        for w in self.winfo_children():
+            w.destroy()
+        self._emb = []
+        self.configure(bg=THEME["bg"])
+        self.setup_styles()
+        self.build_ui()
+        if draft:
+            self.msg_entry.insert("1.0", draft)
+        self.render_chips()
+        self.refresh_session_list()
+        self.render_messages()
+        self.update_knowledge_ui()
+        if self.server_settings:
+            self.apply_settings(self.server_settings, cached=True)
+        self.class_log_restore()
+        self.update_kpis()
+        self.refresh_system_tab()
+        self.refresh_live_ui()
+        try:
+            self.notebook.select(tab)
+        except Exception:
+            pass
+        self.check_connection()
+
+    # ======================================================================= #
+    # LIGAÇÃO AO SERVIDOR
+    # ======================================================================= #
+    def set_status(self, text, color):
+        try:
+            self.status_lbl.config(text=text[:90], fg=color)
         except tk.TclError:
             pass
 
-    def copy_last_reply(self):
-        for m in reversed(self.history):
-            if m["role"] == "assistant":
-                self.copy_text(m["content"])
-                return
+    def check_connection(self):
+        if self._conn_after:
+            self.after_cancel(self._conn_after)
+            self._conn_after = None
+        self.set_status("🟡 a ligar… (o Render pode demorar ~1 min a acordar)", THEME["warn"])
 
-    # ---------- renderização Markdown e Auto-Scroll ----------
-    def scroll_chat_to_bottom(self):
-        self.log.see("end")
-        self.log.yview_moveto(1.0)
-
-    def render_markdown_into(self, widget: tk.Text, text: str):
-        for block in parse_markdown(text):
-            if block[0] == "code":
-                _, lang, code = block
-                self.cp_counter += 1
-                tag = f"cp{self.cp_counter}"
-                widget.insert("end", f"  {lang or 'código'}   ", "code_head")
-                widget.insert("end", "[copiar]", ("code_head", "copy", tag))
-                widget.insert("end", "\n", "code_head")
-                widget.tag_bind(tag, "<Button-1>", lambda e, c=code: self.copy_text(c))
-                widget.tag_bind(tag, "<Enter>", lambda e, w=widget: w.config(cursor="hand2"))
-                widget.tag_bind(tag, "<Leave>", lambda e, w=widget: w.config(cursor=""))
-                widget.insert("end", (code or " ") + "\n", "code")
+        def done(res, err):
+            was_connected = self.connected
+            if err:
+                self.connected = self.is_admin = False
+                self.set_status(f"🔴 offline — {err}"[:110], THEME["danger"])
+                self.class_status.config(text=f"🔴 Sala de Aula sem ligação: {err}\nA mostrar as lições guardadas neste PC; "
+                                              "volta a tentar a cada 20 s.", fg=THEME["danger"])
+                delay = 20_000
             else:
-                _, kind, runs = block
-                base = () if kind == "p" else (kind,)
-                if kind == "li":
-                    widget.insert("end", "•  ", base)
-                for txt, tag in runs:
-                    widget.insert("end", txt, base + ((tag,) if tag else ()))
-                widget.insert("end", "\n", base)
-
-    def render_user(self, text: str):
-        with self.editable():
-            self.log.insert("end", "Tu\n", "who_user")
-            self.log.insert("end", text.strip() + "\n")
-        self.scroll_chat_to_bottom()
-
-    def render_bot(self, text: str):
-        with self.editable():
-            self.log.insert("end", "gois.v1\n", "who_bot")
-            self.render_markdown_into(self.log, text)
-        self.scroll_chat_to_bottom()
-
-    def render_history(self):
-        with self.editable():
-            self.log.delete("1.0", "end")
-        if not self.history:
-            with self.editable():
-                self.log.insert(
-                    "end",
-                    "Olá! Escreve uma mensagem para conversar com o gois.v1, ou abre a aba "
-                    "'📊 Comparação % (Gemini & DeepSeek)' para veres a evolução em tempo real nas 16 categorias.\n"
-                    "Enter envia · Shift+Enter muda de linha · Esc pára · Ctrl+N nova conversa.\n",
-                    "sys",
-                )
-        for m in self.history:
-            if m["role"] == "user":
-                self.render_user(m["content"])
-            else:
-                self.render_bot(m["content"])
-        self.scroll_chat_to_bottom()
-
-    def write_sys(self, text: str, error: bool = False):
-        with self.editable():
-            self.log.insert("end", text + "\n", "err" if error else "sys")
-        self.scroll_chat_to_bottom()
-
-    # ---------- Sala de Aula, Comparação % & Sincronização Inteligente ----------
-    def initial_connect(self):
-        self.set_status("A ligar ao servidor (se estava a dormir no Render pode demorar ~1 min)...")
-        self.refresh_classroom_from_server(initial=True)
-
-    def schedule_classroom_refresh(self):
-        if not self.streaming and not self.learning_busy:
-            self.refresh_classroom_from_server(silent=True)
-        self.root.after(12000, self.schedule_classroom_refresh)
-
-    def merge_knowledge(self, remote_items: list):
-        if not isinstance(remote_items, list):
-            return
-        by_id = {x.get("id"): x for x in self.knowledge_items if isinstance(x, dict) and x.get("id")}
-        for item in reversed(remote_items):
-            if isinstance(item, dict) and item.get("id"):
-                by_id[item["id"]] = item
-        merged = sorted(by_id.values(), key=lambda x: str(x.get("id", "")), reverse=True)[:300]
-        if len(merged) != len(self.knowledge_items) or (merged and self.knowledge_items and merged[0].get("id") != self.knowledge_items[0].get("id")):
-            self.knowledge_items = merged
-            save_json_file(LOCAL_KNOWLEDGE_FILE, self.knowledge_items)
-            self.refresh_knowledge_list()
-
-    def refresh_classroom_from_server(self, initial: bool = False, silent: bool = False):
-        if not silent:
-            self.set_status("A atualizar Comparação % e Sala de Aula...")
-
-        def fetch_all():
-            settings = http_json(self.cfg["server"] + "/api/settings", timeout=90)
-            knowledge = http_json(self.cfg["server"] + "/api/knowledge", timeout=60)
-            if isinstance(knowledge, list) and len(knowledge) == 0 and len(self.knowledge_items) > 0:
-                http_json(
-                    self.cfg["server"] + "/api/sync/import",
-                    {"knowledge": self.knowledge_items},
-                    self.cfg["sync_token"],
-                    timeout=60,
-                )
-                settings = http_json(self.cfg["server"] + "/api/settings", timeout=60)
-                knowledge = http_json(self.cfg["server"] + "/api/knowledge", timeout=60)
-            return {"settings": settings, "knowledge": knowledge}
-
-        def done(res, err):
-            if err:
-                if not silent:
-                    self.set_status("Servidor indisponível: " + err, error=True)
-                return
-            st = res.get("settings") if isinstance(res.get("settings"), dict) else {}
-            kn = res.get("knowledge") if isinstance(res.get("knowledge"), list) else []
-            self.server_state.update(st)
-            self.reconcile_tokens(st.get("tokens"))
-            self.merge_knowledge(kn)
-            self.update_classroom_ui()
-            self.update_comparison_ui()
-            ov = (st.get("comparison") or {}).get("overall") or {}
-            providers = ", ".join(st.get("providers_with_key", [])) or "NENHUM"
-            self.set_status(
-                f"Online · gois.v1 {ov.get('gois_v1', 0)}% (Paridade Gemini {ov.get('parity_vs_gemini', 0)}%) · "
-                f"{len(self.knowledge_items)} lições · {providers}"
-            )
-
-        self.background(fetch_all, done)
-
-    def update_comparison_ui(self):
-        comp = self.server_state.get("comparison") or {}
-        ov = comp.get("overall") or {}
-        cats = comp.get("categories") or []
-
-        self.kpi_gois_val.config(text=f"{ov.get('gois_v1', 0)}%")
-        self.kpi_gois_sub.config(text=f"{ov.get('total_lessons', len(self.knowledge_items))} lições + {ov.get('total_skills', 6)} skills")
-
-        self.kpi_gem_val.config(text=f"{ov.get('gemini', 90.1)}%")
-        dg = ov.get("delta_gemini", 0)
-        self.kpi_gem_sub.config(text=f"Paridade: {ov.get('parity_vs_gemini', 0)}% ({'+' if dg >= 0 else ''}{dg}%)")
-
-        self.kpi_ds_val.config(text=f"{ov.get('deepseek', 90.3)}%")
-        dd = ov.get("delta_deepseek", 0)
-        self.kpi_ds_sub.config(text=f"Paridade: {ov.get('parity_vs_deepseek', 0)}% ({'+' if dd >= 0 else ''}{dd}%)")
-
-        self.kpi_cov_val.config(text=f"{ov.get('categories_studied', 0)} / {ov.get('total_categories', 16)}")
-        self.kpi_cov_sub.config(text=f"{ov.get('total_benchmarks', 0)} desafios benchmark realizados")
-
-        sel = self.comp_listbox.curselection()
-        prev_idx = sel[0] if sel else 0
-        self.comp_listbox.delete(0, "end")
-        for r in cats:
-            name = (r.get("category") or "")[:48]
-            g = f"{r.get('gois_v1', 0):5.1f}%"
-            gm = f"{r.get('gemini', 0):5.1f}%"
-            ds = f"{r.get('deepseek', 0):5.1f}%"
-            lc = f"{r.get('lessons_count', 0)}"
-            par = f"{r.get('parity_vs_gemini', 0):5.1f}%"
-            row_line = f" {name:<48} │ {g:>7} │ {gm:>7} │ {ds:>8} │ {lc:>6} │ {par:>8}"
-            self.comp_listbox.insert("end", row_line)
-
-        if cats:
-            idx = min(prev_idx, len(cats) - 1)
-            self.comp_listbox.selection_set(idx)
-            self.show_comp_detail(idx)
-
-    def on_select_comp_category(self, _event=None):
-        sel = self.comp_listbox.curselection()
-        if not sel:
-            return
-        self.show_comp_detail(sel[0])
-
-    def show_comp_detail(self, idx: int):
-        cats = (self.server_state.get("comparison") or {}).get("categories") or []
-        if idx < 0 or idx >= len(cats):
-            return
-        r = cats[idx]
-        cat_name = r.get("category", "")
-        g = r.get("gois_v1", 0.0)
-        gm = r.get("gemini", 0.0)
-        ds = r.get("deepseek", 0.0)
-
-        md_top = (
-            f"# {cat_name}\n\n"
-            f"**Estado:** {r.get('status', '')}\n"
-            f"**Lições estudadas nesta área:** `{r.get('lessons_count', 0)}`  ·  **Skills ativas:** `{r.get('skills_count', 0)}`\n\n"
-            f"## Barras Comparativas em %\n"
-        )
-        bars_text = (
-            f" gois.v1  [{make_bar(g, 18)}] {g:5.1f}%\n"
-            f" Gemini   [{make_bar(gm, 18)}] {gm:5.1f}%\n"
-            f" DeepSeek [{make_bar(ds, 18)}] {ds:5.1f}%\n\n"
-        )
-        md_bottom = (
-            f"- **Paridade gois.v1 vs Gemini:** `{r.get('parity_vs_gemini', 0)}%` ({'+' if r.get('delta_gemini', 0) >= 0 else ''}{r.get('delta_gemini', 0)}%)\n"
-            f"- **Paridade gois.v1 vs DeepSeek:** `{r.get('parity_vs_deepseek', 0)}%` ({'+' if r.get('delta_deepseek', 0) >= 0 else ''}{r.get('delta_deepseek', 0)}%)\n\n"
-            f"## Últimas Lições Aprendidas nesta Categoria\n"
-        )
-        matching = [k for k in self.knowledge_items if k.get("category") == cat_name][:4]
-        if not matching:
-            md_bottom += "- *Ainda sem lições específicas gravadas nesta categoria. Clica em **⚡ Estudar Categoria Selecionada Agora** para subir já a percentagem!*\n"
-        else:
-            for m in matching:
-                md_bottom += f"- **{m.get('title', 'Lição')}** (`{m.get('teacher', 'IA')}`)\n"
-
-        with self.editable(self.comp_detail):
-            self.comp_detail.delete("1.0", "end")
-            self.render_markdown_into(self.comp_detail, md_top)
-            self.comp_detail.insert("end", bars_text, "code")
-            self.render_markdown_into(self.comp_detail, md_bottom)
-
-    def open_comparison_info(self):
-        T = THEME
-        win = tk.Toplevel(self.root)
-        win.title("ⓘ Como Ler os Resultados da Comparação % — Passo a Passo")
-        win.configure(bg=T["panel"])
-        win.geometry("760x640")
-        win.transient(self.root)
-
-        head = tk.Frame(win, bg=T["panel_alt"], padx=16, pady=12)
-        head.pack(fill="x")
-        tk.Label(
-            head,
-            text="ⓘ Guia Passo a Passo: Como Ler a Comparação % (gois.v1 vs Gemini vs DeepSeek)",
-            bg=T["panel_alt"], fg=T["fg"], font=("Segoe UI", 12, "bold"), anchor="w",
-        ).pack(fill="x")
-        tk.Label(
-            head,
-            text="Entende cada número, a fórmula real de cálculo e porque o teu gois.v1 supera os modelos base nas tuas áreas fortes.",
-            bg=T["panel_alt"], fg=T["muted"], font=FONT_SMALL, anchor="w",
-        ).pack(fill="x", pady=(2, 0))
-
-        body = tk.Frame(win, bg=T["bg"])
-        body.pack(fill="both", expand=True, padx=14, pady=12)
-        scroll = tk.Scrollbar(body, orient="vertical")
-        scroll.pack(side="right", fill="y")
-        txt = tk.Text(
-            body, wrap="word", bg=T["bg"], fg=T["fg"], bd=0, relief="flat",
-            font=FONT_UI, padx=14, pady=12, yscrollcommand=scroll.set,
-        )
-        txt.pack(side="left", fill="both", expand=True)
-        scroll.config(command=txt.yview)
-        self.configure_markdown_tags(txt)
-
-        guide_md = (
-            "# Passo 1 — O que significam os 4 Cartões no Topo?\n"
-            "- **🟢 DOMÍNIO GLOBAL gois.v1:** É a média global (em `%`) do teu modelo nas **16 categorias** universais da IA moderna. Subirá sempre que o `gois.v1` aprende novas lições na Sala de Aula ou recebe novas Skills.\n"
-            "- **🔵 REFERÊNCIA GOOGLE GEMINI (`90.1%`):** É a pontuação média de referência (benchmark MMLU / LiveBench / Coding) do Google Gemini 2.0/2.5 puro sem personalização.\n"
-            "- **🟣 REFERÊNCIA DEEPSEEK V3/R1 (`90.3%`):** É a pontuação média de referência do DeepSeek V3/R1 puro sem memória de projeto.\n"
-            "- **📚 COBERTURA DAS 16 CATEGORIAS:** Mostra quantas das 16 áreas universais já têm pelo menos 1 lição estudada pelo `gois.v1`.\n\n"
-            "# Passo 2 — Como ler cada coluna da Tabela das 16 Categorias?\n"
-            "- **`Categoria`:** O domínio técnico ou científico avaliado (todas as 16 áreas do Gemini e DeepSeek).\n"
-            "- **`gois.v1`:** Capacidade efetiva atual do teu modelo nessa categoria específica.\n"
-            "- **`Gemini` e `DeepSeek`:** Pontuação base oficial de cada um desses modelos nessa área.\n"
-            "- **`Lições`:** Quantas aulas avançadas o `gois.v1` já estudou, destilou e guardou na memória RAG para essa categoria.\n"
-            "- **`Paridade`:** É o rácio direto `(gois.v1 ÷ Gemini) × 100`.\n"
-            "  - **Abaixo de `95%`:** Categoria em evolução (precisa de mais lições da Sala de Aula).\n"
-            "  - **Entre `95%` e `99.9%`:** O `gois.v1` já está praticamente empatado com o Gemini/DeepSeek.\n"
-            "  - **`100%` ou mais (`🔥 Acima`):** O `gois.v1` já ultrapassou o modelo base nessa especialidade!\n\n"
-            "# Passo 3 — Porque é que o `gois.v1` consegue ser superior (>100% Paridade) em certas áreas? 😜\n"
-            "O Gemini e o DeepSeek normais são **modelos generalistas puros**: quando alguém lhes faz uma pergunta, eles respondem apenas com o treino de fábrica, sem memória acumulada das tuas regras nem lições especializadas.\n\n"
-            "Já o teu **`gois.v1` é um Sistema Composto (Ensemble + RAG + Skills)** que junta **3 camadas**:\n"
-            "1. **Base Multi-Modelo Real (`~72%` a `76%` de partida):** Usa as APIs reais (DeepSeek, Gemini, GPT-OSS 120B, Mistral) em conjunto.\n"
-            "2. **Skills Especializadas Ativas (`+2.2%` a `+6.5%`):** As tuas diretrizes cirúrgicas (em *Arquitetura de Software*, *Game Design & Unity*, *WebGL*, *Hardware Leve*) dão-lhe regras de engenharia que o modelo base sozinho não aplica por defeito.\n"
-            "3. **Lições Destiladas da Sala de Aula (até `+16.5%`):** Cada lição que o `gois.v1` absorve na Sala de Aula fica guardada na base de conhecimento e é **injetada automaticamente no cérebro dele** quando respondes no chat.\n\n"
-            "Por isso, numa área onde o `gois.v1` já tem **Skills + 7 ou 8 Lições estudadas** (como *Arquitetura de Software* ou *Game Design & Unity*), ele responde com **Modelos de Topo + Memória Especializada**, superando um Gemini ou DeepSeek 'cru'!\n\n"
-            "# Passo 4 — Como fazer o `gois.v1` subir nas outras categorias?\n"
-            "1. Clica numa categoria da tabela que tenha poucas lições (ex: *Direito Tecnológico*, *Ciência de Dados* ou *Cibersegurança*).\n"
-            "2. Clica no botão azul **`⚡ Estudar Categoria Selecionada Agora`** para o `gois.v1` ter uma aula imediata e veres a `%` a subir ao vivo.\n"
-            "3. Ou clica no botão verde **`⚔️ Executar Desafio Benchmark Ao Vivo`** para o `gois.v1` resolver um teste prático real avaliado por júri IA (+bónus direto na categoria)."
-        )
-        self.render_markdown_into(txt, guide_md)
-        txt.configure(state="disabled")
-
-        foot = tk.Frame(win, bg=T["panel"], padx=16, pady=10)
-        foot.pack(fill="x")
-        self.make_button(foot, "Percebido, Fechar", win.destroy, kind="primary", padx=16, pady=6).pack(side="right")
-
-    def study_selected_comp_category(self):
-        if self.learning_busy:
-            return
-        cats = (self.server_state.get("comparison") or {}).get("categories") or []
-        sel = self.comp_listbox.curselection()
-        idx = sel[0] if sel else 0
-        cat_name = cats[idx]["category"] if (cats and idx < len(cats)) else DEFAULT_CATEGORIES[0]
-
-        self.learning_busy = True
-        self.btn_study_selected.config(text="⏳ A estudar categoria...", state="disabled")
-        self.lbl_comp_feedback.config(text=f"⚡ A estudar [{cat_name}] com modelo real e a atualizar percentagens...", fg=THEME["warn"])
-
-        def done(res, err):
-            self.learning_busy = False
-            self.btn_study_selected.config(text="⚡ Estudar Categoria Selecionada Agora", state="normal")
-            if err:
-                self.lbl_comp_feedback.config(text="❌ Erro: " + err, fg=THEME["err"])
-                return
-            lesson = (res or {}).get("lesson") or {}
-            settings = (res or {}).get("settings") or {}
-            if settings:
-                self.server_state.update(settings)
-            if lesson:
-                self.merge_knowledge([lesson])
-            self.update_classroom_ui()
-            self.update_comparison_ui()
-            self.lbl_comp_feedback.config(
-                text=f"✅ Lição absorvida em [{cat_name}]: '{lesson.get('title', '')}' (Professor: {lesson.get('teacher', 'IA')}) — Comparação % atualizada!",
-                fg=THEME["bot"],
-            )
-
-        self.background(
-            lambda: http_json(
-                self.cfg["server"] + "/api/classroom/learn",
-                {"category": cat_name, "provider": "auto"},
-                self.cfg["sync_token"],
-                timeout=95,
-            ),
-            done,
-        )
-
-    def run_benchmark_ui(self):
-        if self.learning_busy:
-            return
-        cats = (self.server_state.get("comparison") or {}).get("categories") or []
-        sel = self.comp_listbox.curselection()
-        cat_name = cats[sel[0]]["category"] if (sel and cats and sel[0] < len(cats)) else ""
-
-        self.learning_busy = True
-        self.btn_run_bench.config(text="⏳ Benchmark em curso...", state="disabled")
-        self.lbl_comp_feedback.config(
-            text="⚔️ A executar desafio de Benchmark Real e a comparar qualidade técnica face a Gemini & DeepSeek...",
-            fg=THEME["warn"],
-        )
-
-        def done(res, err):
-            self.learning_busy = False
-            self.btn_run_bench.config(text="⚔️ Executar Desafio Benchmark Ao Vivo", state="normal")
-            if err:
-                self.lbl_comp_feedback.config(text="❌ Erro no benchmark: " + err, fg=THEME["err"])
-                return
-            b = (res or {}).get("benchmark") or {}
-            comp = (res or {}).get("comparison") or {}
-            lesson = (res or {}).get("lesson") or {}
-            if comp:
-                self.server_state["comparison"] = comp
-            if lesson:
-                self.merge_knowledge([lesson])
-            self.update_comparison_ui()
-            self.update_classroom_ui()
-            self.lbl_comp_feedback.config(
-                text=f"🏆 Benchmark [{b.get('category', '')}] concluído em {b.get('elapsed_s', 0)}s: gois.v1 {b.get('gois_score', 0)}% vs Gemini {b.get('gemini_ref', 0)}% vs DeepSeek {b.get('deepseek_ref', 0)}%!",
-                fg=THEME["bot"],
-            )
-
-        self.background(
-            lambda: http_json(
-                self.cfg["server"] + "/api/comparison/benchmark",
-                {"category": cat_name},
-                self.cfg["sync_token"],
-                timeout=95,
-            ),
-            done,
-        )
-
-    # ---------- Tokens: barra no topo, limite diário, botão ligado/desligado ----------
-    def build_tokens_bar(self):
-        T = THEME
-        bg = T["panel_alt"]
-        bar = tk.Frame(self.root, bg=bg)
-        bar.pack(fill="x")
-
-        left = tk.Frame(bar, bg=bg)
-        left.pack(side="left", padx=(12, 6), pady=5)
-        tk.Label(left, text="🔋 Tokens hoje:", bg=bg, fg=T["muted"], font=FONT_SMALL).pack(side="left")
-        self.lbl_tok_main = tk.Label(left, text="a ligar ao servidor...", bg=bg, fg=T["fg"], font=FONT_UI_BOLD)
-        self.lbl_tok_main.pack(side="left", padx=(6, 8))
-        self.tok_canvas = tk.Canvas(left, width=TOKEN_BAR_W, height=10, bg=T["border"], highlightthickness=0, bd=0)
-        self.tok_canvas.pack(side="left", padx=(0, 10))
-        self.lbl_tok_state = tk.Label(left, text="", bg=bg, fg=T["muted"], font=FONT_SMALL)
-        self.lbl_tok_state.pack(side="left")
-
-        right = tk.Frame(bar, bg=bg)
-        right.pack(side="right", padx=(6, 12), pady=4)
-        self.lbl_tok_total = tk.Label(right, text="Total acumulado: —", bg=bg, fg=T["muted"], font=FONT_SMALL)
-        self.lbl_tok_total.pack(side="left", padx=(0, 14))
-        tk.Label(right, text="Limite/dia (0 = sem):", bg=bg, fg=T["muted"], font=FONT_SMALL).pack(side="left")
-        self.ent_limit = tk.Entry(
-            right, width=10, bg=T["bg"], fg=T["fg"], insertbackground=T["fg"], relief="flat", font=FONT_UI,
-            highlightthickness=1, highlightbackground=T["border"], highlightcolor=T["user"],
-        )
-        lim0 = to_int(self.cfg.get("daily_token_limit"), 0)
-        self.ent_limit.insert(0, str(lim0))
-        self.ent_limit.pack(side="left", padx=(4, 4), ipady=2)
-        self.ent_limit.bind("<Return>", lambda e: self.save_daily_limit())
-        self.make_button(right, "Guardar", self.save_daily_limit, kind="blue", padx=8, pady=2).pack(side="left")
-
-    def update_tokens_ui(self):
-        T = THEME
-        tks = self.server_state.get("tokens")
-        if not isinstance(tks, dict) or not tks:
-            return
-        used = to_int(tks.get("used_today"))
-        lim = to_int(tks.get("daily_limit"))
-        total = to_int(tks.get("used_total"))
-        active = bool(self.server_state.get("classroom_mode", True))
-
-        if lim > 0:
-            pct = min(1.0, used / lim)
-            color = T["bot"] if pct < 0.7 else (T["warn"] if pct < 0.9 else T["err"])
-            main = f"{fmt_tokens(used)} / {fmt_tokens(lim)} · restam {fmt_tokens(max(0, lim - used))}"
-            self.lbl_tok_main.config(text=main, fg=color)
-        else:
-            pct, color = 0.0, T["muted"]
-            self.lbl_tok_main.config(text=f"{fmt_tokens(used)} usados · sem limite diário", fg=T["fg"])
-
-        c = self.tok_canvas
-        c.delete("all")
-        if pct > 0:
-            c.create_rectangle(0, 0, max(2, int(TOKEN_BAR_W * pct)), 10, fill=color, width=0)
-
-        paused = active and (bool(tks.get("auto_paused_by_limit")) or bool(tks.get("limit_reached")))
-        if not active:
-            state, sfg = "⏹ Sala de Aula desligada", T["muted"]
-        elif paused:
-            h, m = divmod(to_int(tks.get("seconds_to_reset")) // 60, 60)
-            state, sfg = f"⏸ Pausa até {tks.get('resets_at', '00:00')} (em {h}h {m:02d}m)", T["warn"]
-        else:
-            state, sfg = "▶ Auto-estudo ativo", T["bot"]
-        self.lbl_tok_state.config(text=state, fg=sfg)
-        self.lbl_tok_total.config(text=f"Total acumulado: {fmt_tokens(total)}")
-
-    def apply_toggle_style(self, active: bool, paused_limit: bool):
-        if not active:
-            text, bg, hover = "🔴 Sala de Aula: DESLIGADA", "#da3633", "#f85149"
-        elif paused_limit:
-            text, bg, hover = "⏸ LIGADA · em pausa (limite)", "#9e6a03", "#bb8009"
-        else:
-            text, bg, hover = "🟢 Sala de Aula: LIGADA", THEME["accent"], "#2ea043"
-        b = self.btn_toggle_classroom
-        b.configure(text=text, bg=bg, activebackground=hover)
-        b._base_bg, b._hover_bg = bg, hover
-
-    def save_daily_limit(self):
-        try:
-            lim = parse_token_amount(self.ent_limit.get())
-        except ValueError:
-            messagebox.showerror(
-                "Limite diário",
-                "Escreve um número (ex.: 200000, 200k ou 1.5m). Usa 0 para não ter limite.",
-                parent=self.root,
-            )
-            return
-        self.cfg["daily_token_limit"] = lim
-        save_json_file(CONFIG_FILE, self.cfg)
-        self.ent_limit.delete(0, "end")
-        self.ent_limit.insert(0, str(lim))
-        self.limit_push_pending = True
-        self.set_status("A guardar o limite diário de tokens...")
-
-        def done(res, err):
-            self.limit_push_pending = False
-            if err:
-                self.set_status("Erro ao guardar o limite: " + err, error=True)
-                return
-            if isinstance(res, dict):
-                self.server_state.update(res)
-            self.update_classroom_ui()
-            self.set_status("Limite diário guardado: " + (fmt_tokens(lim) if lim else "sem limite"))
-
-        self.background(
-            lambda: http_json(self.cfg["server"] + "/api/settings", {"daily_token_limit": lim}, self.cfg["sync_token"]),
-            done,
-        )
-
-    def reconcile_tokens(self, tks):
-        if not isinstance(tks, dict) or not tks:
-            return
-        payload = {}
-
-        if not self.limit_push_pending:
-            local_lim = to_int(self.cfg.get("daily_token_limit"))
-            srv_lim = to_int(tks.get("daily_limit"))
-            if local_lim != srv_lim:
-                if local_lim > 0:
-                    payload["daily_token_limit"] = local_lim
+                res, ms = res
+                self.latency_ms, self.health = ms, res
+                self.connected = True
+                self.is_admin = bool(res.get("admin"))
+                self.admin_configured = bool(res.get("admin_configured"))
+                if not self.admin_configured:
+                    self.set_status("🟠 online · ADMIN_TOKEN não definido no servidor", THEME["warn"])
+                    self.class_status.config(text="🟠 O servidor responde, mas não tem ADMIN_TOKEN — por isso a Sala de Aula, as skills e o "
+                                                  "benchmark ficam bloqueados.\nRender > gois-v1 > Environment > Add: ADMIN_TOKEN = "
+                                                  "(a tua palavra-passe) > Save; depois ⚙ Definições com a mesma palavra-passe.", fg=THEME["warn"])
+                    self.warn_no_token_once()
+                elif self.is_admin:
+                    self.set_status(f"🟢 online · admin · v{res.get('version', '?')}", THEME["bot"])
                 else:
-                    self.cfg["daily_token_limit"] = srv_lim
-                    save_json_file(CONFIG_FILE, self.cfg)
-                    self.ent_limit.delete(0, "end")
-                    self.ent_limit.insert(0, str(srv_lim))
+                    self.set_status("🟠 online · token inválido (⚙ Definições)", THEME["warn"])
+                    self.class_status.config(text="🟠 O token guardado neste PC não coincide com o ADMIN_TOKEN do servidor (⚙ Definições).",
+                                             fg=THEME["warn"])
+                if self.is_admin:
+                    # o plano gratuito do Render tem disco efémero: se o servidor perdeu skills/lições, repõe a partir deste PC
+                    lost = res.get("skills", 0) < len(self.all_skills()) or res.get("lessons", 0) < len(self.kb_cache)
+                    if lost or not was_connected:
+                        self.sync_skills()
+                        self.refresh_classroom()
+                        self.fetch_live()
+                delay = 240_000  # ping periódico: também impede o Render de adormecer enquanto a app está aberta
+            self._conn_after = self.after(delay, self.check_connection)
+            self.refresh_system_tab()
+            self.refresh_live_ui()
 
-        cache = self.cfg.get("usage_cache") if isinstance(self.cfg.get("usage_cache"), dict) else {}
-        date = str(tks.get("date") or "")
-        new = {"date": date}
-        for k in ("used_today", "chat_today", "classroom_today"):
-            srv = to_int(tks.get(k))
-            new[k] = max(srv, to_int(cache.get(k))) if cache.get("date") == date else srv
-        new["used_total"] = max(to_int(tks.get("used_total")), to_int(cache.get("used_total")))
-        if new != cache:
-            self.cfg["usage_cache"] = new
-            save_json_file(CONFIG_FILE, self.cfg)
-        if new["used_today"] > to_int(tks.get("used_today")) or new["used_total"] > to_int(tks.get("used_total")):
-            payload["usage_restore"] = new
+        def probe():
+            t0 = time.time()
+            h = self.api.call("GET", "/api/health", timeout=80)
+            return h, int((time.time() - t0) * 1000)
 
-        if not payload:
+        self.bg(probe, done)
+
+    def warn_no_token_once(self):
+        if self._warned_token:
             return
+        self._warned_token = True
+        messagebox.showinfo(
+            "ADMIN_TOKEN em falta no servidor",
+            "O servidor gois-v1 está online mas não tem a variável ADMIN_TOKEN, por isso rejeita tudo o que é de administrador "
+            "(Sala de Aula, skills, benchmark). O chat continua a funcionar porque é público.\n\n"
+            "1) render.com > gois-v1 > Environment > Add Environment Variable\n"
+            "2) ADMIN_TOKEN = uma palavra-passe tua  >  Save (o Render faz redeploy)\n"
+            "3) Aqui: ⚙ Definições > Token de administrador = a mesma palavra-passe", parent=self)
 
-        def done(res, err):
-            if err:
-                return
-            if isinstance(res, dict):
-                self.server_state.update(res)
-                self.update_classroom_ui()
+    def on_tab_changed(self, _e=None):
+        tab = self.notebook.index(self.notebook.select())
+        if tab in (1, 2) and self.is_admin:
+            self.refresh_classroom()
+        if tab == 1:
+            self.after(50, self.draw_all_charts)
+        if tab == 4:
+            self.refresh_system_tab()
+        self.schedule_poll(tab == 2)
 
-        self.background(
-            lambda: http_json(self.cfg["server"] + "/api/settings", payload, self.cfg["sync_token"]),
-            done,
-        )
+    def schedule_poll(self, on):
+        if self._poll_after:
+            self.after_cancel(self._poll_after)
+            self._poll_after = None
+        if on:
+            self._poll_after = self.after(8000, self.poll_tick)
 
-    def update_classroom_ui(self):
-        T = THEME
-        st = self.server_state
-        active = bool(st.get("classroom_mode", True))
-        learning_now = bool(st.get("learning_now", False))
-        providers = st.get("providers_with_key") or []
-        tks = st.get("tokens") if isinstance(st.get("tokens"), dict) else {}
-        paused_limit = active and (bool(tks.get("auto_paused_by_limit")) or bool(tks.get("limit_reached")))
+    def poll_tick(self):
+        self._poll_after = None
+        if self.notebook.index(self.notebook.select()) == 2:
+            if self.is_admin and not self.class_busy:
+                self.refresh_classroom()
+            self.schedule_poll(True)
 
-        if learning_now:
-            mode_str = f"⚡ A APRENDER AGORA COM MODELO REAL ({st.get('current_teacher', 'IA')})..."
-            fg_color = T["warn"]
-        elif paused_limit:
-            mode_str = "⏸ SALA DE AULA EM PAUSA: limite diário de tokens atingido — retoma sozinha à meia-noite"
-            fg_color = T["warn"]
-        elif active:
-            mode_str = "🟢 MODO SALA DE AULA AUTÓNOMA: ATIVO (a estudar todas as 16 categorias de Gemini & DeepSeek)"
-            fg_color = T["bot"]
-        else:
-            mode_str = "🔴 MODO SALA DE AULA AUTÓNOMA: PAUSADO"
-            fg_color = T["err"]
-
-        self.lbl_cls_mode.config(text=mode_str, fg=fg_color)
-        self.lbl_cls_models.config(
-            text="Modelos Professores Ativos no Servidor: "
-            + (", ".join(providers) if providers else "Nenhum configurado")
-        )
-
-        topic = st.get("current_topic") or "Em espera..."
-        last_title = st.get("last_learned_title") or (self.knowledge_items[0].get("title") if self.knowledge_items else "Nenhuma ainda")
-        last_teacher = st.get("last_teacher") or (self.knowledge_items[0].get("teacher", "") if self.knowledge_items else "")
-        teacher_badge = f" ({last_teacher})" if last_teacher else ""
-        self.lbl_cls_topic.config(text=f"Tópico em Foco: {topic}   |   Última Lição: {last_title}{teacher_badge}")
-
-        ov = (st.get("comparison") or {}).get("overall") or {}
-        self.chat_classroom_banner.config(
-            text=(
-                f"📊 gois.v1: {ov.get('gois_v1', 0)}% vs Gemini: {ov.get('gemini', 90.1)}% vs DeepSeek: {ov.get('deepseek', 90.3)}% "
-                f"(Paridade: {ov.get('parity_vs_gemini', 0)}%) · 🏫 {len(self.knowledge_items)} lições ({ov.get('categories_studied', 0)}/16 categorias) — clica para abrir Comparação"
-            ),
-            fg=T["bot"] if active else T["muted"],
-        )
-        self.apply_toggle_style(active, paused_limit)
-        self.update_tokens_ui()
-
-    def refresh_knowledge_list(self):
-        self.lbl_lessons_count.config(text=f"📚 Tudo o que já aprendeu ({len(self.knowledge_items)} lições)")
-        sel = self.lessons_list.curselection()
-        prev_idx = sel[0] if sel else 0
-        self.lessons_list.delete(0, "end")
-        for item in self.knowledge_items:
-            cat = (item.get("category") or "Geral").split(",")[0].split(" & ")[0]
-            title = item.get("title") or "Lição"
-            teacher = (item.get("teacher") or "IA").split(" · ")[0]
-            self.lessons_list.insert("end", f"[{cat}] {title}  ({teacher})")
-        if self.knowledge_items:
-            idx = min(prev_idx, len(self.knowledge_items) - 1)
-            self.lessons_list.selection_set(idx)
-            self.show_lesson_at(idx)
-
-    def on_select_lesson(self, _event=None):
-        sel = self.lessons_list.curselection()
-        if not sel:
-            return
-        self.show_lesson_at(sel[0])
-
-    def show_lesson_at(self, idx: int):
-        if idx < 0 or idx >= len(self.knowledge_items):
-            return
-        item = self.knowledge_items[idx]
-        title = item.get("title") or "Lição"
-        cat = item.get("category") or "Geral"
-        teacher = item.get("teacher") or "Modelo Real"
-        ts = item.get("timestamp") or ""
-        self.lbl_lesson_header.config(text=f"{title}  ·  [{cat}]  ·  Professor: {teacher}")
-        with self.editable(self.lesson_viewer):
-            self.lesson_viewer.delete("1.0", "end")
-            meta_md = f"**Categoria:** `{cat}` · **Modelo Professor:** `{teacher}` · **Data:** `{ts}`\n\n"
-            self.render_markdown_into(self.lesson_viewer, meta_md + (item.get("content") or ""))
-
-    def toggle_classroom(self):
-        new_mode = not bool(self.server_state.get("classroom_mode", True))
-        self.set_status("A alterar estado da Sala de Aula...")
-
-        def done(res, err):
-            if err:
-                self.set_status("Erro ao alterar Sala de Aula: " + err, error=True)
-                return
-            if isinstance(res, dict):
-                self.server_state.update(res)
-            self.update_classroom_ui()
-
-        self.background(
-            lambda: http_json(
-                self.cfg["server"] + "/api/settings",
-                {"classroom_mode": new_mode},
-                self.cfg["sync_token"],
-            ),
-            done,
-        )
-
-    def learn_now(self):
-        if self.learning_busy:
-            return
-        self.learning_busy = True
-        provider_raw = self.cmb_teacher.get().strip()
-        provider = "auto" if provider_raw.startswith("auto") else provider_raw
-        category = self.cmb_category.get().strip() or DEFAULT_CATEGORIES[0]
-        custom_topic = self.ent_custom_topic.get().strip()
-
-        self.btn_learn_now.config(text="⏳ A aprender...", state="disabled")
-        self.lbl_cls_mode.config(
-            text=f"⚡ A ligar ao modelo ({provider}) para estudar '{custom_topic or category}'...",
-            fg=THEME["warn"],
-        )
-        self.set_status("A estudar tópico em tempo real com o modelo professor...")
-
-        payload = {"provider": provider, "category": category, "topic": custom_topic}
-
-        def done(res, err):
-            self.learning_busy = False
-            self.btn_learn_now.config(text="⚡ Aprender Agora com Modelo Real", state="normal")
-            if err:
-                self.set_status("Falha ao aprender tópico: " + err, error=True)
-                messagebox.showerror("Sala de Aula", f"Não foi possível concluir a lição:\n{err}")
-                self.update_classroom_ui()
-                return
-            lesson = (res or {}).get("lesson")
-            settings = (res or {}).get("settings")
-            if isinstance(settings, dict):
-                self.server_state.update(settings)
-            if isinstance(lesson, dict):
-                self.merge_knowledge([lesson])
-                self.lessons_list.selection_clear(0, "end")
-                self.lessons_list.selection_set(0)
-                self.show_lesson_at(0)
-            self.ent_custom_topic.delete(0, "end")
-            self.update_classroom_ui()
-            self.update_comparison_ui()
-            self.set_status("Nova lição aprendida e comparação % atualizada!")
-
-        self.background(
-            lambda: http_json(self.cfg["server"] + "/api/classroom/learn", payload, self.cfg["sync_token"], timeout=95),
-            done,
-        )
-
-    def export_all_knowledge(self):
-        if not self.knowledge_items and not self.skills_items:
-            messagebox.showinfo("Exportar", "Ainda não há lições aprendidas para exportar.")
-            return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".md",
-            initialfile="gois_v1_conhecimento_" + time.strftime("%Y%m%d_%H%M") + ".md",
-            filetypes=[("Markdown", "*.md"), ("Texto", "*.txt")],
-        )
-        if not path:
-            return
-        ov = ((self.server_state.get("comparison") or {}).get("overall")) or {}
-        lines = ["# BASE DE CONHECIMENTO, COMPARAÇÃO & SALA DE AULA — gois.v1\n"]
-        lines.append(
-            f"*Total: {len(self.knowledge_items)} lições aprendidas · "
-            f"gois.v1 {ov.get('gois_v1', 0)}% vs Gemini {ov.get('gemini', 90.1)}% vs DeepSeek {ov.get('deepseek', 90.3)}%.*\n"
-        )
-        for k in self.knowledge_items:
-            lines.append(
-                f"## {k.get('title', 'Lição')}\n"
-                f"- **Categoria:** {k.get('category', 'Geral')}\n"
-                f"- **Modelo Professor:** {k.get('teacher', 'IA')}\n"
-                f"- **Data:** {k.get('timestamp', '')}\n\n"
-                f"{k.get('content', '').strip()}\n\n---\n"
-            )
-        try:
-            Path(path).write_text("\n".join(lines), encoding="utf-8")
-            self.set_status("Base de conhecimento exportada com sucesso.")
-        except Exception as e:
-            messagebox.showerror("Exportar", f"Erro ao guardar ficheiro: {e}")
-
-    # ---------- Skills & Chaves API ----------
-    def refresh_skills_from_server(self):
-        def fetch():
-            skills = http_json(self.cfg["server"] + "/api/skills", timeout=60)
-            keys = http_json(self.cfg["server"] + "/api/keys/status", timeout=60)
-            try:
-                render = http_json(self.cfg["server"] + "/api/render/status", timeout=30)
-            except Exception:
-                render = None
-            return {"skills": skills, "keys": keys, "render": render}
-
-        def done(res, err):
-            if err:
-                self.set_status("Erro ao carregar skills/chaves: " + err, error=True)
-                return
-            skills = res.get("skills")
-            if isinstance(skills, list):
-                self.skills_items = skills
-                save_json_file(LOCAL_SKILLS_FILE, skills)
-                self.skills_listbox.delete(0, "end")
-                for s in skills:
-                    self.skills_listbox.insert("end", f"[{s.get('type', 'SKILL')}] {s.get('title', '')} — {s.get('content', '')[:90]}")
-            keys = res.get("keys")
-            if isinstance(keys, dict):
-                lines = []
-                render = res.get("render")
-                if isinstance(render, dict):
-                    if render.get("enabled"):
-                        lines.append("☁️ Sincronização com o Render: LIGADA")
-                    else:
-                        falta = ", ".join(render.get("missing") or []) or "configuração"
-                        lines.append(f"☁️ Sincronização com o Render: desligada (falta: {falta})")
-                else:
-                    lines.append("☁️ Sincronização com o Render: indisponível (servidor antigo)")
-                for name, info in keys.items():
-                    ok = "🟢 Ativa" if info.get("configured") else "🔴 Sem chave"
-                    src_raw = info.get("source")
-                    if src_raw == "sincronizada":
-                        src = " (só em memória, perde-se ao reiniciar)"
-                    elif src_raw == "environment":
-                        src = " (Environment do Render)"
-                    elif src_raw:
-                        src = f" ({src_raw})"
-                    else:
-                        src = ""
-                    mdl = info.get("model", "")
-                    lines.append(f"• {name} [{mdl}]:  {ok}{src}")
-                self.lbl_keys_status.config(text="\n".join(lines))
-
-        self.background(fetch, done)
-
-    def add_skill_ui(self):
-        stype = self.cmb_skill_type.get().strip() or "SKILL"
-        title = self.ent_skill_title.get().strip()
-        content = self.txt_skill_content.get("1.0", "end").strip()
-        if not title or not content:
-            messagebox.showwarning("Skills", "Preenche o título e o conteúdo da Skill/Diretriz.")
-            return
-        new_item = {"id": f"s_{int(time.time() * 1000)}", "type": stype, "title": title, "content": content}
-
-        def done(_res, err):
-            if err:
-                messagebox.showerror("Skills", f"Erro ao guardar skill: {err}")
-                return
-            self.ent_skill_title.delete(0, "end")
-            self.txt_skill_content.delete("1.0", "end")
-            self.refresh_skills_from_server()
-            self.refresh_classroom_from_server(silent=True)
-            self.set_status("Nova skill adicionada e comparação % atualizada.")
-
-        self.background(
-            lambda: http_json(self.cfg["server"] + "/api/skills", new_item, self.cfg["sync_token"]),
-            done,
-        )
-
-    def delete_selected_skill(self):
-        sel = self.skills_listbox.curselection()
-        if not sel or sel[0] >= len(self.skills_items):
-            return
-        skill = self.skills_items[sel[0]]
-        sid = skill.get("id")
-        if not sid:
-            return
-
-        def done(_res, err):
-            if err:
-                messagebox.showerror("Skills", f"Não foi possível remover: {err}")
-                return
-            self.refresh_skills_from_server()
-            self.refresh_classroom_from_server(silent=True)
-
-        self.background(
-            lambda: http_json(f"{self.cfg['server']}/api/skills/{sid}", None, self.cfg["sync_token"], method="DELETE"),
-            done,
-        )
-
-    def send_api_key_ui(self):
-        provider = self.cmb_key_provider.get().strip()
-        key = self.ent_api_key.get().strip()
-        if not key:
-            messagebox.showwarning("Chave API", "Cola uma chave API válida primeiro.")
-            return
-
-        def done(res, err):
-            if err:
-                messagebox.showerror("Chave API", f"Erro ao enviar chave: {err}")
-                return
-            self.ent_api_key.delete(0, "end")
-            self.refresh_skills_from_server()
-            self.refresh_classroom_from_server(silent=True)
-            res = res if isinstance(res, dict) else {}
-            if res.get("persisted"):
-                messagebox.showinfo(
-                    "Chave API",
-                    f"Chave para {provider} ativada e gravada no Environment do Render (permanente).",
-                )
-            elif res.get("render_enabled"):
-                detalhe = "\n".join(res.get("warnings") or []) or "Não foi possível gravar no Render."
-                messagebox.showwarning(
-                    "Chave API",
-                    f"Chave para {provider} ativada só em memória.\n\n{detalhe}",
-                )
-            else:
-                messagebox.showinfo(
-                    "Chave API",
-                    f"Chave para {provider} ativada no servidor (só em memória; "
-                    "liga a sincronização do Render para a tornar permanente).",
-                )
-
-        self.background(
-            lambda: http_json(
-                self.cfg["server"] + "/api/keys",
-                {"provider": provider, "key": key},
-                self.cfg["sync_token"],
-            ),
-            done,
-        )
-
-    def remove_api_key_ui(self):
-        provider = self.cmb_key_provider.get().strip()
-        if not provider:
-            return
-        if not messagebox.askyesno(
-            "Remover chave",
-            f"Remover a chave de {provider}?\n\n"
-            "Com a sincronização do Render ligada, a variável também é apagada do Environment do Render.",
-        ):
-            return
-
-        def done(res, err):
-            if err:
-                messagebox.showerror("Remover chave", f"Não foi possível remover: {err}")
-                return
-            self.refresh_skills_from_server()
-            self.refresh_classroom_from_server(silent=True)
-            res = res if isinstance(res, dict) else {}
-            avisos = "\n".join(res.get("warnings") or [])
-            if avisos:
-                messagebox.showwarning("Remover chave", f"Chave de {provider} removida com avisos:\n\n{avisos}")
-            else:
-                messagebox.showinfo("Remover chave", f"Chave de {provider} removida.")
-
-        self.background(
-            lambda: http_json(
-                f"{self.cfg['server']}/api/keys/{urllib.parse.quote(provider)}",
-                None,
-                self.cfg["sync_token"],
-                method="DELETE",
-            ),
-            done,
-        )
-
-    # ---------- Sincronização & Exportação Chat ----------
-    def save_session(self):
-        save_json_file(SESSION_FILE, self.history)
-
-    def new_chat(self):
-        if self.streaming:
-            self.stop()
-        self.history = []
-        self.save_session()
-        self.render_history()
-
-    def sync(self):
-        payload = {}
-        for name, field in (("gois_skills_db.json", "skills"), ("gois_keys.json", "keys")):
-            for folder in (APP_DIR, Path.cwd()):
-                f = folder / name
-                if f.is_file():
-                    data = load_json_file(f, None)
-                    if data is not None:
-                        payload[field] = data
-                    break
-        if self.knowledge_items:
-            payload["knowledge"] = self.knowledge_items
-        if not payload:
-            messagebox.showwarning("Sincronizar", "Nenhum ficheiro encontrado para sincronizar.")
-            return
-        self.set_status("A sincronizar com o Render...")
-
-        def done(res, err):
-            if err:
-                self.set_status("Falha na sincronização", error=True)
-                self.write_sys("Sincronização falhou: " + err, error=True)
-                return
-            imp = res.get("imported", {})
-            keys = ", ".join(imp.get("keys", [])) or "mantidas as do servidor"
-            self.write_sys(
-                f"Sincronizado com sucesso: {imp.get('skills', 0)} skills, "
-                f"{imp.get('knowledge', 0)} lições, chaves: {keys}."
-            )
-            for w in (res.get("warnings") or []):
-                self.write_sys(str(w))
-            self.refresh_classroom_from_server(silent=True)
-
-        self.background(
-            lambda: http_json(self.cfg["server"] + "/api/sync/import", payload, self.cfg["sync_token"]),
-            done,
-        )
-
-    def export(self):
-        if not self.history:
-            messagebox.showinfo("Exportar", "Ainda não há conversa para exportar.")
-            return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".md",
-            initialfile="conversa_gois_" + time.strftime("%Y%m%d_%H%M") + ".md",
-            filetypes=[("Markdown", "*.md"), ("Texto", "*.txt")],
-        )
-        if not path:
-            return
-        parts = []
-        for m in self.history:
-            parts.append(("## Tu\n\n" if m["role"] == "user" else "## gois.v1\n\n") + m["content"].strip())
-        try:
-            Path(path).write_text("\n\n".join(parts) + "\n", encoding="utf-8")
-            self.set_status("Conversa exportada.")
-        except Exception as e:
-            messagebox.showerror("Exportar", f"Não foi possível guardar: {e}")
-
-    # ---------- Chat com Streaming SSE e Auto-Scroll Contínuo ----------
-    def send(self):
-        if self.streaming:
-            return
-        text = self.entry.get("1.0", "end").strip()
-        if not text:
-            return
-        self.entry.delete("1.0", "end")
-        self.last_user_text = text
-        self.history.append({"role": "user", "content": text})
-        self.save_session()
-        if len(self.history) == 1:
-            self.render_history()
-        else:
-            self.render_user(text)
-        self.start_reply()
-
-    def regenerate(self):
-        if self.streaming:
-            return
-        if self.history and self.history[-1]["role"] == "assistant":
-            self.history.pop()
-        if not self.history or self.history[-1]["role"] != "user":
-            return
-        self.last_user_text = self.history[-1]["content"]
-        self.save_session()
-        self.render_history()
-        self.start_reply()
-
-    def start_reply(self):
-        self.streaming = True
-        self.cancel = threading.Event()
-        self.reply_buf = []
-        self.reply_model = ""
-        self.got_token = False
-        self.send_btn.pack_forget()
-        self.stop_btn.pack(fill="x", before=self.regen_btn)
-        self.set_status("A pensar...")
-
-        with self.editable():
-            self.log.insert("end", "gois.v1\n", "who_bot")
-            self.log.mark_set("reply_start", "end-1c")
-            self.log.mark_gravity("reply_start", "left")
-        self.scroll_chat_to_bottom()
-
-        limit = max(2, int(self.cfg["history"]))
-        messages = self.history[-limit:]
-        cancel = self.cancel
-
-        def emit(kind, value):
-            self.ui_q.put(lambda: self.on_stream_event(kind, value, cancel))
-
-        threading.Thread(target=stream_chat, args=(self.cfg, messages, emit, cancel), daemon=True).start()
-        self.root.after(8000, lambda: self.cold_start_hint(cancel))
-
-    def cold_start_hint(self, cancel):
-        if self.streaming and cancel is self.cancel and not self.got_token:
-            self.set_status("A acordar o servidor (plano gratuito do Render, pode demorar cerca de 1 minuto)...")
-
-    def on_stream_event(self, kind, value, cancel):
-        if cancel is not self.cancel or not self.streaming:
-            return
-        if kind == "model":
-            self.reply_model = value
-        elif kind == "delta":
-            if not self.got_token:
-                self.got_token = True
-                self.set_status("A responder...")
-            self.reply_buf.append(value)
-            with self.editable():
-                self.log.insert("end", value)
-            self.scroll_chat_to_bottom()
-        elif kind == "done":
-            self.finish_reply()
-        elif kind == "error":
-            self.finish_reply(error=value)
-
-    def stop(self):
-        if self.streaming:
-            self.cancel.set()
-            self.finish_reply(stopped=True)
-
-    def finish_reply(self, error: str = "", stopped: bool = False):
-        if not self.streaming:
-            return
-        self.streaming = False
-        self.cancel.set()
-        self.root.after(1800, lambda: self.refresh_classroom_from_server(silent=True))
-        text = "".join(self.reply_buf).strip()
-        if not text and not stopped and not error:
-            error = "O modelo devolveu uma resposta vazia."
-        with self.editable():
-            self.log.delete("reply_start", "end-1c")
-            self.log.mark_set("insert_at", "end-1c")
-        self.stop_btn.pack_forget()
-        self.send_btn.pack(fill="x", before=self.regen_btn)
-
-        if text:
-            with self.editable():
-                self.render_markdown_into(self.log, text)
-            suffix = "\n\n*(resposta interrompida)*" if (stopped or error) else ""
-            self.history.append({"role": "assistant", "content": text + suffix})
-            if suffix:
-                self.write_sys("(resposta interrompida)", error=bool(error))
-        elif stopped:
-            if self.history and self.history[-1]["role"] == "user":
-                self.history.pop()
-                self.entry.insert("1.0", self.last_user_text)
-            self.render_history()
-        elif error:
-            if self.history and self.history[-1]["role"] == "user":
-                self.history.pop()
-                self.entry.insert("1.0", self.last_user_text)
-            self.render_history()
-            self.write_sys("Erro: " + error, error=True)
-        self.save_session()
-
-        if error:
-            self.set_status("Erro no pedido", error=True)
-        else:
-            model = f"  ·  {self.reply_model}" if self.reply_model else ""
-            self.set_status("Pronto" + model)
-        self.scroll_chat_to_bottom()
-
-    # ---------- Definições ----------
     def open_settings(self):
-        T = THEME
-        win = tk.Toplevel(self.root)
+        win = tk.Toplevel(self)
         win.title("Definições")
-        win.configure(bg=T["panel"])
-        win.resizable(False, False)
-        win.transient(self.root)
+        win.configure(bg=THEME["panel"])
+        win.geometry("560x540")
+        win.transient(self)
         win.grab_set()
 
-        def row(label, r):
-            tk.Label(win, text=label, bg=T["panel"], fg=T["fg"], font=FONT_UI, anchor="w").grid(
-                row=r, column=0, sticky="w", padx=14, pady=(12, 2)
-            )
-
-        def entry(r, value, show=""):
-            e = tk.Entry(
-                win, width=46, bg=T["bg"], fg=T["fg"], insertbackground=T["fg"], relief="flat",
-                font=FONT_UI, show=show, highlightthickness=1, highlightbackground=T["border"],
-                highlightcolor=T["user"],
-            )
+        def row(label, value="", show=None):
+            tk.Label(win, text=label, bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=18, pady=(12, 2))
+            e = tk.Entry(win, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT, show=show)
             e.insert(0, value)
-            e.grid(row=r, column=1, padx=14, pady=(12, 2), ipady=4)
+            e.pack(fill=tk.X, padx=18, ipady=5)
             return e
 
-        row("Servidor", 0)
-        e_server = entry(0, self.cfg["server"])
-        row("Token de sincronização", 1)
-        e_token = entry(1, self.cfg["sync_token"], show="•")
-        row("Temperatura (0 a 1.5)", 2)
-        e_temp = entry(2, str(self.cfg["temperature"]))
-        row("Mensagens enviadas ao modelo", 3)
-        e_hist = entry(3, str(self.cfg["history"]))
+        e_server = row("URL do servidor", self.cfg["server"])
+        e_token = row("Token de administrador (igual ao ADMIN_TOKEN do servidor)", self.cfg.get("token", ""), show="•")
 
         def save():
-            try:
-                temp = max(0.0, min(1.5, float(e_temp.get().replace(",", "."))))
-                hist = max(2, min(100, int(e_hist.get())))
-            except ValueError:
-                messagebox.showerror("Definições", "Temperatura e mensagens têm de ser números.", parent=win)
-                return
-            server = e_server.get().strip().rstrip("/") or DEFAULT_SERVER
-            if not server.startswith(("http://", "https://")):
-                messagebox.showerror("Definições", "O servidor tem de começar por https://", parent=win)
-                return
-            self.cfg.update({"server": server, "sync_token": e_token.get().strip(), "temperature": temp, "history": hist})
-            save_json_file(CONFIG_FILE, self.cfg)
+            self.cfg["server"] = e_server.get().strip().rstrip("/") or DEFAULT_SERVER
+            self.cfg["token"] = e_token.get().strip()
+            self.save_config()
+            self.api.cfg = self.cfg
+            self.connected = False
+            self.check_connection()
             win.destroy()
-            self.refresh_classroom_from_server()
 
-        btns = tk.Frame(win, bg=T["panel"])
-        btns.grid(row=4, column=0, columnspan=2, pady=16)
-        self.make_button(btns, "Guardar", save, kind="primary").pack(side="left", padx=6)
-        self.make_button(btns, "Cancelar", win.destroy).pack(side="left", padx=6)
+        self.btn(win, "Guardar e reconectar", save, THEME["accent"]).pack(anchor=tk.W, padx=18, pady=12)
 
-    def on_close(self):
-        self.cancel.set()
-        self.save_session()
-        self.root.destroy()
+        tk.Frame(win, bg=THEME["border"], height=1).pack(fill=tk.X, padx=18, pady=6)
+        tk.Label(win, text="Chave API para o servidor", bg=THEME["panel"], fg=THEME["fg"], font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=18)
+        frm = tk.Frame(win, bg=THEME["panel"])
+        frm.pack(fill=tk.X, padx=18, pady=6)
+        prov = ttk.Combobox(frm, values=["Groq", "Gemini", "OpenRouter", "Mistral"], state="readonly", width=12)
+        prov.set("Groq")
+        prov.pack(side=tk.LEFT)
+        e_key = tk.Entry(frm, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT, show="•")
+        e_key.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, ipady=5)
+        info = tk.Label(win, text="", bg=THEME["panel"], fg=THEME["muted"], justify=tk.LEFT, wraplength=520, font=("Segoe UI", 9))
+        info.pack(anchor=tk.W, padx=18)
 
+        def send_key():
+            k = e_key.get().strip()
+            if not k:
+                return
 
-def main():
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
+            def done(res, err):
+                info.config(text=f"❌ {err}" if err else "✅ Enviada. Fica só em memória no servidor — para ser permanente define-a em Render > Environment.")
+                if not err:
+                    e_key.delete(0, tk.END)
+
+            self.bg(lambda: self.api.call("POST", "/api/keys", {"provider": prov.get(), "key": k}), done)
+
+        self.btn(frm, "Enviar", send_key, THEME["accent_blue"]).pack(side=tk.LEFT)
+
+        def show_status():
+            def done(res, err):
+                if err:
+                    info.config(text=f"❌ {err}")
+                else:
+                    info.config(text="Chaves: " + " · ".join(f"{n}: {'✅' if v.get('configured') else '—'}" for n, v in res.items()))
+
+            self.bg(lambda: self.api.call("GET", "/api/keys/status"), done)
+
+        def diagnose():
+            info.config(text="⏳ a testar a ligação…", fg=THEME["muted"])
+
+            def work():
+                h = self.api.call("GET", "/api/health", timeout=80)
+                return "\n".join([
+                    f"✅ Servidor online (v{h.get('version', '?')}) · skills no servidor: {h.get('skills', 0)} · lições: {h.get('lessons', 0)}",
+                    "ADMIN_TOKEN no servidor: " + ("sim" if h.get("admin_configured") else "NÃO — define-o no Render > Environment"),
+                    "Token deste PC: " + ("válido ✅" if h.get("admin") else "inválido ❌"),
+                    "Windows: " + ("a correr como Administrador 🛡" if is_windows_admin() else "sem Administrador ⚠"),
+                ])
+
+            self.bg(work, lambda r, e: info.config(text=f"❌ {e}" if e else r, fg=THEME["danger"] if e else THEME["fg"]))
+
+        rowb = tk.Frame(win, bg=THEME["panel"])
+        rowb.pack(anchor=tk.W, padx=18, pady=6)
+        self.btn(rowb, "Ver estado das chaves", show_status).pack(side=tk.LEFT)
+        self.btn(rowb, "🔌 Testar ligação", diagnose, THEME["accent_blue"]).pack(side=tk.LEFT, padx=6)
+
+    # ======================================================================= #
+    # CHAT
+    # ======================================================================= #
+    def load_sessions(self):
+        data = read_json(SESSION_FILE, [])
+        if isinstance(data, list) and data:
+            return data
+        return [{"id": "default", "title": "Nova conversa", "messages": []}]
+
+    def save_sessions(self):
+        write_json(SESSION_FILE, self.sessions)
+
+    def cur_session(self):
+        return next((s for s in self.sessions if s["id"] == self.current_session_id), None)
+
+    def build_chat_tab(self):
+        pane = tk.PanedWindow(self.tab_chat, orient=tk.HORIZONTAL, bg=THEME["border"], sashwidth=4)
+        pane.pack(fill=tk.BOTH, expand=True)
+
+        side = tk.Frame(pane, bg=THEME["panel"], width=260)
+        pane.add(side, minsize=200)
+        tk.Label(side, text="Histórico de Chats", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=10, pady=8)
+        self.btn(side, "+ Nova Conversa", self.new_chat_session, THEME["accent_blue"]).pack(fill=tk.X, padx=10, pady=3)
+        row = tk.Frame(side, bg=THEME["panel"])
+        row.pack(fill=tk.X, padx=10, pady=3)
+        self.btn(row, "✏ Renomear", self.rename_session, padx=6).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self.btn(row, "🗑 Apagar", self.delete_session, padx=6).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+        self.btn(side, "⬇ Exportar (.md)", self.export_session).pack(fill=tk.X, padx=10, pady=3)
+        self.btn(side, "🧹 Apagar todas", self.delete_all_sessions).pack(fill=tk.X, padx=10, pady=3)
+        srow = tk.Frame(side, bg=THEME["panel"])
+        srow.pack(fill=tk.X, padx=10, pady=(6, 0))
+        tk.Label(srow, text="🔎", bg=THEME["panel"], fg=THEME["muted"]).pack(side=tk.LEFT)
+        tk.Entry(srow, textvariable=self.hist_filter, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white",
+                 relief=tk.FLAT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4, ipady=3)
+        lb_frame = tk.Frame(side, bg=THEME["panel"])
+        lb_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        sb = ttk.Scrollbar(lb_frame, orient="vertical")
+        self.hist_list = tk.Listbox(lb_frame, bg=THEME["panel"], fg=THEME["fg"], selectbackground=THEME["accent_blue"],
+                                    selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=0, activestyle="none",
+                                    font=("Segoe UI", 10), yscrollcommand=sb.set, exportselection=False)
+        sb.config(command=self.hist_list.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.hist_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.hist_list.bind("<<ListboxSelect>>", self.on_history_select)
+        self.hist_list.bind("<Delete>", lambda e: self.delete_session())
+        self.session_ids = []
+
+        area = tk.Frame(pane, bg=THEME["bg"])
+        pane.add(area, minsize=560)
+
+        bottom = tk.Frame(area, bg=THEME["panel"])
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
+        self.chips = tk.Frame(bottom, bg=THEME["panel"])
+        self.chips.pack(fill=tk.X, padx=10, pady=(6, 0))
+        inrow = tk.Frame(bottom, bg=THEME["panel"])
+        inrow.pack(fill=tk.X, padx=8, pady=6)
+        ab = tk.Frame(inrow, bg=THEME["panel"])
+        ab.pack(side=tk.LEFT, padx=(2, 6))
+        self.btn(ab, "📎 Anexar", self.attach_dialog).pack(fill=tk.X)
+        self.btn(ab, "📁 Pasta", self.attach_folder).pack(fill=tk.X, pady=(3, 0))
+        self.msg_entry = tk.Text(inrow, height=3, bg=THEME["code_bg"], fg=THEME["fg"], font=("Segoe UI", 10),
+                                 insertbackground="white", relief=tk.FLAT, padx=8, pady=6, wrap=tk.WORD)
+        self.msg_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.msg_entry.bind("<Return>", self.on_enter_pressed)
+        self.send_btn = self.btn(inrow, "Enviar 🚀", self.send_message, THEME["accent"], font=("Segoe UI", 10, "bold"))
+        self.send_btn.pack(side=tk.RIGHT, padx=(6, 2))
+        hint = "Enter envia · Shift+Enter nova linha · arrasta ficheiros para a janela" if windnd else \
+            "Enter envia · Shift+Enter nova linha · usa 📎 para anexar (arrastar indisponível)"
+        hrow = tk.Frame(bottom, bg=THEME["panel"])
+        hrow.pack(fill=tk.X, padx=12, pady=(0, 4))
+        self.hint_lbl = tk.Label(hrow, text=hint, bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 8))
+        self.hint_lbl.pack(side=tk.LEFT)
+        tk.Checkbutton(hrow, text="🧠 usar skills relevantes no chat", variable=self.use_skills, bg=THEME["panel"], fg=THEME["muted"],
+                       selectcolor=THEME["code_bg"], activebackground=THEME["panel"], activeforeground=THEME["fg"],
+                       font=("Segoe UI", 8)).pack(side=tk.RIGHT)
+        if not windnd and sys.platform == "win32":
+            self.btn(hrow, "Ativar arrastar (pip install windnd)", self.install_windnd, padx=6, pady=0,
+                     font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=8)
+
+        sbc = ttk.Scrollbar(area, orient="vertical")
+        self.chat_text = tk.Text(area, bg=THEME["bg"], fg=THEME["fg"], wrap=tk.WORD, state=tk.DISABLED, relief=tk.FLAT,
+                                 padx=16, pady=10, font=("Segoe UI", 10), cursor="arrow", highlightthickness=0,
+                                 yscrollcommand=sbc.set, spacing3=2)
+        sbc.config(command=self.chat_text.yview)
+        sbc.pack(side=tk.RIGHT, fill=tk.Y)
+        self.chat_text.pack(fill=tk.BOTH, expand=True)
+        t = self.chat_text
+        t.tag_configure("who_user", foreground=THEME["user"], font=("Segoe UI", 9, "bold"), spacing1=12)
+        t.tag_configure("who_bot", foreground=THEME["bot"], font=("Segoe UI", 9, "bold"), spacing1=12)
+        t.tag_configure("meta", foreground=THEME["muted"], font=("Segoe UI", 8))
+        t.tag_configure("user_body", background=THEME["user_bg"], lmargin1=10, lmargin2=10, rmargin=10)
+        t.tag_configure("bot_body", lmargin1=10, lmargin2=10, rmargin=10)
+        t.tag_configure("err", foreground=THEME["danger"], lmargin1=10, lmargin2=10)
+
+    # ---- histórico ----
+    def init_first_session(self):
+        self.switch_session(self.sessions[0]["id"])
+
+    def touch(self, sess):
+        sess["updated"] = time.time()
+
+    def refresh_session_list(self):
+        self.sessions.sort(key=lambda x: x.get("updated", 0), reverse=True)  # mais recentes primeiro (ordenação estável)
+        q = self.hist_filter.get().strip().lower()
+
+        def match(x):
+            return not q or q in x["title"].lower() or any(q in m.get("text", "").lower() for m in x["messages"])
+
+        shown = [x for x in self.sessions if match(x)]
+        self.hist_list.delete(0, tk.END)
+        self.session_ids = [x["id"] for x in shown]
+        for x in shown:
+            when = time.strftime("%d/%m %H:%M", time.localtime(x["updated"])) if x.get("updated") else ""
+            self.hist_list.insert(tk.END, f"  {x['title']}" + (f"   · {when}" if when else ""))
+        if self.current_session_id in self.session_ids:
+            i = self.session_ids.index(self.current_session_id)
+            self.hist_list.selection_clear(0, tk.END)
+            self.hist_list.selection_set(i)
+            self.hist_list.see(i)
+
+    def on_history_select(self, _e=None):
+        sel = self.hist_list.curselection()
+        if sel and sel[0] < len(self.session_ids):
+            sid = self.session_ids[sel[0]]
+            if sid != self.current_session_id:
+                self.switch_session(sid)
+
+    def new_chat_session(self):
+        sid = f"s{int(time.time() * 1000)}"
+        self.sessions.insert(0, {"id": sid, "title": "Nova conversa", "messages": [], "updated": time.time()})
+        self.save_sessions()
+        self.last_error = None
+        self.switch_session(sid)
+
+    def switch_session(self, sid):
+        self.current_session_id = sid
+        self.refresh_session_list()
+        self.render_messages()
+
+    def rename_session(self):
+        s = self.cur_session()
+        if not s:
+            return
+        name = simpledialog.askstring("Renomear", "Novo nome da conversa:", initialvalue=s["title"], parent=self)
+        if name and name.strip():
+            s["title"] = name.strip()[:60]
+            self.touch(s)
+            self.save_sessions()
+            self.refresh_session_list()
+
+    def delete_session(self):
+        s = self.cur_session()
+        if not s or not messagebox.askyesno("Apagar", f"Apagar a conversa «{s['title']}»?", parent=self):
+            return
+        self.sessions = [x for x in self.sessions if x["id"] != s["id"]]
+        if not self.sessions:
+            self.sessions = [{"id": f"s{int(time.time() * 1000)}", "title": "Nova conversa", "messages": []}]
+        self.save_sessions()
+        self.switch_session(self.sessions[0]["id"])
+
+    def delete_all_sessions(self):
+        if not messagebox.askyesno("Apagar tudo", "Apagar TODAS as conversas? Isto não pode ser desfeito.", parent=self):
+            return
+        sid = f"s{int(time.time() * 1000)}"
+        self.sessions = [{"id": sid, "title": "Nova conversa", "messages": [], "updated": time.time()}]
+        self.save_sessions()
+        self.switch_session(sid)
+
+    def export_session(self):
+        s = self.cur_session()
+        if not s or not s["messages"]:
+            return
+        path = filedialog.asksaveasfilename(initialfile=re.sub(r"[^\w\-]+", "_", s["title"]) + ".md", defaultextension=".md",
+                                            filetypes=[("Markdown", "*.md"), ("Todos", "*.*")])
+        if path:
+            md = "\n".join(f"## {'Tu' if m['role'] == 'user' else 'gois.v1'}\n\n{m['text']}\n" for m in s["messages"])
+            Path(path).write_text(md, encoding="utf-8")
+            self.flash(f"💾 Guardado: {path}", THEME["bot"])
+
+    # ---- renderização ----
+    def copy_text(self, text, btn=None):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.update_idletasks()
+        if btn is not None:
+            old = btn.cget("text")
+            btn.config(text="✅ Copiado!")
+            self.after(1500, lambda: btn.winfo_exists() and btn.config(text=old))
+
+    def save_code(self, code, lang, fname):
+        ext = EXT.get(lang, "txt")
+        path = filedialog.asksaveasfilename(initialfile=fname or f"codigo.{ext}", defaultextension="." + ext,
+                                            filetypes=[(ext.upper() + " file", "*." + ext), ("Todos os ficheiros", "*.*")])
+        if path:
+            Path(path).write_text(code, encoding="utf-8")
+            self.flash(f"💾 Guardado: {path}", THEME["bot"])
+
+    def save_all_code(self, blocks):
+        folder = filedialog.askdirectory(title="Pasta onde guardar os ficheiros")
+        if not folder:
+            return
+        for i, b in enumerate(blocks, 1):
+            name = b["fname"] or f"codigo_{i}.{EXT.get(b['lang'], 'txt')}"
+            Path(folder, Path(name).name).write_text(b["code"], encoding="utf-8")
+        self.flash(f"💾 {len(blocks)} ficheiros guardados em {folder}", THEME["bot"])
+
+    def _forward_wheel(self, widget):
+        widget.bind("<MouseWheel>", lambda e: (self.chat_text.yview_scroll(int(-e.delta / 120), "units"), "break")[1])
+
+    def make_code_block(self, blk):
+        t = self.chat_text
+        fr = tk.Frame(t, bg=THEME["code_bg"], highlightbackground=THEME["border"], highlightthickness=1)
+        head = tk.Frame(fr, bg=THEME["panel_alt"])
+        head.pack(fill=tk.X)
+        title = blk["fname"] or (blk["lang"] or "código")
+        tk.Label(head, text=title.upper() if not blk["fname"] else title, bg=THEME["panel_alt"], fg=THEME["muted"],
+                 font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT, padx=8)
+        cp = tk.Button(head, text="📋 Copiar", bg=THEME["btn"], fg=THEME["fg"], relief=tk.FLAT, font=("Segoe UI", 8, "bold"), cursor="hand2")
+        cp.config(command=lambda: self.copy_text(blk["code"], cp))
+        cp.pack(side=tk.RIGHT, padx=3, pady=3)
+        tk.Button(head, text="💾 Download", bg=THEME["accent_blue"], fg="#ffffff", relief=tk.FLAT, font=("Segoe UI", 8, "bold"),
+                  cursor="hand2", command=lambda: self.save_code(blk["code"], blk["lang"], blk["fname"])).pack(side=tk.RIGHT, padx=3, pady=3)
+        lines = blk["code"].count("\n") + 1
+        long_ = lines > 22
+        body = tk.Text(fr, height=min(lines, 22), width=92, bg=THEME["code_bg"], fg=THEME["code_fg"], font=("Consolas", 10),
+                       wrap=tk.WORD, relief=tk.FLAT, padx=8, pady=6, highlightthickness=0)
+        body.insert("1.0", blk["code"])
+        body.config(state=tk.DISABLED)
+        if long_:
+            vs = ttk.Scrollbar(fr, orient="vertical", command=body.yview)
+            body.config(yscrollcommand=vs.set)
+            vs.pack(side=tk.RIGHT, fill=tk.Y)
+        else:
+            self._forward_wheel(body)
+        body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._forward_wheel(head)
+        self._emb.append(fr)
+        return fr
+
+    def render_messages(self):
+        t = self.chat_text
+        for w in self._emb:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._emb = []
+        t.config(state=tk.NORMAL)
+        t.delete("1.0", tk.END)
+        s = self.cur_session()
+        if not s:
+            t.config(state=tk.DISABLED)
+            return
+        if not s["messages"]:
+            t.insert(tk.END, "🟢 gois.v1\n", "who_bot")
+            t.insert(tk.END, "Olá! Escreve uma mensagem, anexa ficheiros (📎 ou arrasta) e eu respondo com o histórico desta conversa.\n", "bot_body")
+        for m in s["messages"]:
+            if m["role"] == "user":
+                t.insert(tk.END, "👤 Tu\n", "who_user")
+                t.insert(tk.END, m["text"] + "\n", "user_body")
+                if m.get("attachments"):
+                    t.insert(tk.END, "📎 " + "  ·  ".join(a["name"] for a in m["attachments"]) + "\n", "meta")
+            else:
+                t.insert(tk.END, "🟢 gois.v1", "who_bot")
+                if m.get("model"):
+                    t.insert(tk.END, "   " + m["model"], "meta")
+                t.insert(tk.END, "\n")
+                blocks = split_blocks(m["text"])
+                for b in blocks:
+                    if b["kind"] == "text":
+                        if b["text"].strip():
+                            t.insert(tk.END, b["text"].strip("\n") + "\n", "bot_body")
+                    else:
+                        t.window_create(tk.END, window=self.make_code_block(b), padx=10, pady=4)
+                        t.insert(tk.END, "\n")
+                self.insert_message_actions(m, [b for b in blocks if b["kind"] == "code"])
+        if self.busy and self.pending_sid == self.current_session_id:
+            t.insert(tk.END, "🟢 gois.v1\n", "who_bot")
+            t.insert(tk.END, "⏳ A pensar…\n", "meta")
+        if self.last_error and self.last_error[0] == self.current_session_id:
+            t.insert(tk.END, "❌ " + self.last_error[1] + "\n", "err")
+            rb = tk.Button(t, text="↻ Tentar novamente", bg=THEME["accent_blue"], fg="#ffffff", relief=tk.FLAT,
+                           font=("Segoe UI", 9, "bold"), cursor="hand2", command=self.retry_last)
+            self._emb.append(rb)
+            t.window_create(tk.END, window=rb, padx=10, pady=4)
+            t.insert(tk.END, "\n")
+        t.config(state=tk.DISABLED)
+        t.see(tk.END)
+
+    def insert_message_actions(self, m, code_blocks):
+        t = self.chat_text
+        fr = tk.Frame(t, bg=THEME["bg"])
+        c = tk.Button(fr, text="📋 Copiar resposta", bg=THEME["btn"], fg=THEME["fg"], relief=tk.FLAT, font=("Segoe UI", 8), cursor="hand2")
+        c.config(command=lambda: self.copy_text(m["text"], c))
+        c.pack(side=tk.LEFT, padx=2)
+        tk.Button(fr, text="💾 Guardar resposta (.md)", bg=THEME["btn"], fg=THEME["fg"], relief=tk.FLAT, font=("Segoe UI", 8),
+                  cursor="hand2", command=lambda: self.save_code(m["text"], "md", "resposta.md")).pack(side=tk.LEFT, padx=2)
+        if len(code_blocks) > 1:
+            tk.Button(fr, text=f"📦 Guardar os {len(code_blocks)} ficheiros", bg=THEME["btn"], fg=THEME["fg"], relief=tk.FLAT,
+                      font=("Segoe UI", 8), cursor="hand2", command=lambda: self.save_all_code(code_blocks)).pack(side=tk.LEFT, padx=2)
+        self._emb.append(fr)
+        self._forward_wheel(fr)
+        t.window_create(tk.END, window=fr, padx=10, pady=2)
+        t.insert(tk.END, "\n")
+
+    # ---- anexos ----
+    def setup_drop(self):
+        if sys.platform != "win32":
+            return
+        try:  # com a app elevada (admin) o Windows bloqueia por omissão o arrastar vindo do Explorer (UIPI)
+            import ctypes
+            self.update_idletasks()
+            hwnds = {self.winfo_id(), ctypes.windll.user32.GetParent(self.winfo_id())}
+            for h in hwnds:
+                for msg in (0x233, 0x4A, 0x49):  # WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA
+                    ctypes.windll.user32.ChangeWindowMessageFilterEx(h, msg, 1, None)
+        except Exception:
+            pass
+        if windnd:
+            try:
+                windnd.hook_dropfiles(self, func=self.on_drop, force_unicode=True)
+            except TypeError:  # versões antigas do windnd não têm force_unicode
+                try:
+                    windnd.hook_dropfiles(self, func=self.on_drop)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    def install_windnd(self):
+        self.flash("⏳ a instalar windnd…", THEME["warn"], 20000)
+
+        def work():
+            exe = sys.executable
+            if getattr(sys, "frozen", False):
+                raise RuntimeError("Na versão .exe inclui o windnd no build (pip install windnd antes do PyInstaller).")
+            r = subprocess.run([exe, "-m", "pip", "install", "windnd"], capture_output=True, text=True, timeout=180)
+            if r.returncode:
+                raise RuntimeError((r.stderr or r.stdout)[-200:])
+
+        def done(_r, err):
+            if err:
+                self.flash(f"❌ {err}", THEME["danger"], 12000)
+            else:
+                messagebox.showinfo("windnd", "Instalado. Fecha e abre a app para ativar o arrastar ficheiros.", parent=self)
+
+        self.bg(work, done)
+
+    def on_drop(self, files):
+        paths = []
+        for f in files:
+            if isinstance(f, bytes):
+                try:
+                    f = f.decode("utf-8")
+                except UnicodeDecodeError:
+                    f = f.decode("mbcs" if sys.platform == "win32" else "latin-1", "ignore")
+            paths.append(f)
+        self.ui_q.put(lambda: self.add_files(paths))
+
+    def expand_paths(self, paths, limit=40):
+        """Pastas -> os ficheiros de texto lá dentro (sem node_modules/.git, no máx. `limit`)."""
+        skip = {"node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build"}
+        out = []
+        for p in paths:
+            pp = Path(p)
+            if pp.is_dir():
+                for root, dirs, fns in os.walk(pp):
+                    dirs[:] = [d for d in dirs if d not in skip]
+                    for fn in sorted(fns):
+                        if Path(fn).suffix.lower() not in BLOCKED_EXT:
+                            out.append(str(Path(root, fn)))
+                        if len(out) >= limit:
+                            return out
+            else:
+                out.append(str(pp))
+        return out
+
+    def attach_folder(self):
+        folder = filedialog.askdirectory(title="Anexar todos os ficheiros de texto de uma pasta")
+        if folder:
+            self.add_files([folder])
+
+    def attach_dialog(self):
+        paths = filedialog.askopenfilenames(title="Anexar ficheiros")
+        if paths:
+            self.add_files(list(paths))
+
+    def add_files(self, paths):
+        self.notebook.select(self.tab_chat)
+        paths = self.expand_paths(paths)
+        if len(paths) >= 40:
+            self.flash("Pasta grande: só os primeiros 40 ficheiros foram anexados.", THEME["warn"])
+        for p in paths:
+            if any(a["path"] == p for a in self.attachments):
+                continue
+            content, note = read_attachment(p)
+            if content is None:
+                messagebox.showwarning("Anexo ignorado", f"{Path(p).name}: {note}", parent=self)
+                continue
+            self.attachments.append({"path": p, "name": Path(p).name, "content": content})
+            if note:
+                self.flash(f"{Path(p).name}: {note}", THEME["warn"])
+        self.render_chips()
+
+    def render_chips(self):
+        for w in self.chips.winfo_children():
+            w.destroy()
+        for i, a in enumerate(self.attachments):
+            chip = tk.Frame(self.chips, bg=THEME["accent_blue"])
+            chip.pack(side=tk.LEFT, padx=(0, 6), pady=2)
+            tk.Label(chip, text=f"📄 {a['name']} ({len(a['content']) // 1000 or 1} KB)", bg=THEME["accent_blue"], fg="#ffffff",
+                     font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(6, 2))
+            tk.Button(chip, text="✕", bg=THEME["accent_blue"], fg="#ffffff", relief=tk.FLAT, font=("Segoe UI", 8, "bold"),
+                      cursor="hand2", command=lambda i=i: self.remove_attachment(i)).pack(side=tk.LEFT)
+
+    def remove_attachment(self, i):
+        if 0 <= i < len(self.attachments):
+            self.attachments.pop(i)
+            self.render_chips()
+
+    # ---- envio ----
+    def on_enter_pressed(self, event):
+        if not event.state & 0x1:  # Shift = nova linha
+            self.send_message()
+            return "break"
+
+    def send_message(self):
+        if self.busy:
+            return
+        text = self.msg_entry.get("1.0", tk.END).strip()
+        if not text and not self.attachments:
+            return
+        s = self.cur_session()
+        msg = {"role": "user", "text": text or "(ficheiros anexados)"}
+        if self.attachments:
+            msg["attachments"] = [{"name": a["name"], "content": a["content"]} for a in self.attachments]
+        s["messages"].append(msg)
+        self.touch(s)
+        if len(s["messages"]) == 1:
+            s["title"] = (text or self.attachments[0]["name"])[:40]
+        self.attachments = []
+        self.render_chips()
+        self.msg_entry.delete("1.0", tk.END)
+        self.last_error = None
+        self.save_sessions()
+        self.refresh_session_list()
+        self.request_reply()
+
+    def retry_last(self):
+        if not self.busy:
+            self.last_error = None
+            self.request_reply()
+
+    _STOP = {"para", "como", "isto", "isso", "esta", "este", "essa", "esse", "quero", "preciso", "fazer", "pode", "podes",
+             "sobre", "mais", "muito", "onde", "quando", "qual", "quais", "tenho", "temos", "ficheiro", "código", "codigo",
+             "ajuda", "favor", "agora", "ainda", "também", "porque", "tudo", "todos", "todas", "uma", "umas", "uns"}
+
+    def relevant_skills(self, text, k=4):
+        words = {w for w in re.findall(r"\w{5,}", text.lower()) if w not in self._STOP}
+        if not words:
+            return []
+        scored = []
+        for sk in self.all_skills():
+            hay = (sk["title"] + " " + sk.get("content", "")).lower()
+            score = sum(1 for w in words if w in hay)
+            if score >= 2:
+                scored.append((score, sk))
+        scored.sort(key=lambda x: -x[0])
+        return [sk for _, sk in scored[:k]]
+
+    def build_api_messages(self, s):
+        msgs = s["messages"][-12:]
+        out, n = [], len(msgs)
+        for i, m in enumerate(msgs):
+            content = m["text"]
+            for a in m.get("attachments", []):
+                c = a["content"] if i >= n - 4 else a["content"][:3000]
+                content += f"\n\n[Ficheiro anexado: {a['name']}]\n```\n{c}\n```"
+            out.append({"role": "user" if m["role"] == "user" else "assistant", "content": content})
+        while out and out[0]["role"] != "user":
+            out.pop(0)
+        if self.use_skills.get() and msgs:
+            picked = self.relevant_skills(msgs[-1]["text"] if msgs[-1]["role"] == "user" else "")
+            if picked:
+                guide = "Especialidades relevantes (usa-as só se ajudarem a pergunta):\n" + "\n".join(
+                    f"- {sk['title']}: {sk.get('content', '')[:400]}" for sk in picked)
+                out.insert(0, {"role": "system", "content": guide})
+        return out
+
+    def request_reply(self):
+        s = self.cur_session()
+        sid, msgs = s["id"], self.build_api_messages(s)
+        self.busy, self.pending_sid = True, sid
+        self.send_btn.config(state=tk.DISABLED)
+        self.render_messages()
+
+        def done(res, err):
+            self.busy = False
+            self.send_btn.config(state=tk.NORMAL)
+            sess = next((x for x in self.sessions if x["id"] == sid), None)
+            if err or not sess:
+                self.last_error = (sid, str(err or "Conversa apagada."))
+            else:
+                try:
+                    reply = (res["choices"][0]["message"].get("content") or "").strip() or "Sem resposta."
+                except Exception:
+                    reply = "Sem resposta."
+                sess["messages"].append({"role": "bot", "text": reply, "model": res.get("model", "")})
+                self.touch(sess)
+                self.save_sessions()
+                self.refresh_session_list()
+            if self.current_session_id == sid:
+                self.render_messages()
+
+        self.bg(lambda: self.api.call("POST", "/v1/chat/completions", {"messages": msgs, "stream": False}, timeout=150), done)
+
+    # ======================================================================= #
+    # SKILLS
+    # ======================================================================= #
+    def all_skills(self):
+        out = [dict(s, origin="integrada") for s in BUILTIN_SKILLS]
+        out += [dict(s, origin="personalizada") for s in self.custom_skills]
+        return out
+
+    def build_skills_tab(self):
+        top = tk.Frame(self.tab_skills, bg=THEME["bg"])
+        top.pack(fill=tk.X, padx=20, pady=(14, 6))
+        self.skills_title = tk.Label(top, text="", bg=THEME["bg"], fg=THEME["fg"], font=("Segoe UI", 12, "bold"))
+        self.skills_title.pack(side=tk.LEFT)
+        self.btn(top, "⬆ Sincronizar com servidor", self.sync_skills).pack(side=tk.RIGHT, padx=3)
+        self.btn(top, "⬇ Exportar .json", self.export_skills).pack(side=tk.RIGHT, padx=3)
+        self.btn(top, "🗑 Apagar personalizada", self.delete_skill).pack(side=tk.RIGHT, padx=3)
+        self.btn(top, "+ Nova skill", self.add_skill_dialog, THEME["accent"]).pack(side=tk.RIGHT, padx=3)
+
+        sf = tk.Frame(self.tab_skills, bg=THEME["bg"])
+        sf.pack(fill=tk.X, padx=20)
+        tk.Label(sf, text="🔎", bg=THEME["bg"], fg=THEME["muted"]).pack(side=tk.LEFT)
+        tk.Entry(sf, textvariable=self.skill_search, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white",
+                 relief=tk.FLAT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, ipady=4)
+
+        pw = tk.PanedWindow(self.tab_skills, orient=tk.VERTICAL, bg=THEME["border"], sashwidth=4)
+        pw.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        tf = tk.Frame(pw, bg=THEME["panel"])
+        pw.add(tf, minsize=200)
+        self.skill_tree = ttk.Treeview(tf, columns=("tipo", "titulo", "origem"), show="headings", selectmode="browse")
+        for c, w, txt in (("tipo", 70, "Tipo"), ("titulo", 700, "Título"), ("origem", 120, "Origem")):
+            self.skill_tree.heading(c, text=txt)
+            self.skill_tree.column(c, width=w, anchor=tk.W)
+        vs = ttk.Scrollbar(tf, orient="vertical", command=self.skill_tree.yview)
+        self.skill_tree.configure(yscrollcommand=vs.set)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        self.skill_tree.pack(fill=tk.BOTH, expand=True)
+        self.skill_tree.bind("<<TreeviewSelect>>", self.show_skill)
+        self.skill_detail = tk.Text(pw, height=6, bg=THEME["code_bg"], fg=THEME["fg"], font=("Segoe UI", 10), wrap=tk.WORD,
+                                    relief=tk.FLAT, padx=10, pady=8, state=tk.DISABLED)
+        pw.add(self.skill_detail, minsize=90)
+        self.skill_rows = []
+        self.refresh_skills()
+
+    def refresh_skills(self):
+        q = self.skill_search.get().strip().lower()
+        rows = [s for s in self.all_skills() if not q or q in s["title"].lower() or q in s.get("content", "").lower()]
+        self.skill_rows = rows
+        self.skill_tree.delete(*self.skill_tree.get_children())
+        for i, s in enumerate(rows):
+            self.skill_tree.insert("", tk.END, iid=str(i), values=(s.get("type", "SKILL"), s["title"], s["origin"]))
+        total = len(BUILTIN_SKILLS) + len(self.custom_skills)
+        self.skills_title.config(text=f"🧠 Skills & Diretrizes — {total} ({len(BUILTIN_SKILLS)} integradas + {len(self.custom_skills)} tuas)")
+
+    def show_skill(self, _e=None):
+        sel = self.skill_tree.selection()
+        self.skill_detail.config(state=tk.NORMAL)
+        self.skill_detail.delete("1.0", tk.END)
+        if sel:
+            s = self.skill_rows[int(sel[0])]
+            self.skill_detail.insert(tk.END, s["title"] + "\n\n" + s.get("content", ""))
+        self.skill_detail.config(state=tk.DISABLED)
+
+    def add_skill_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Nova skill")
+        win.configure(bg=THEME["panel"])
+        win.geometry("520x340")
+        win.transient(self)
+        win.grab_set()
+        tk.Label(win, text="Título", bg=THEME["panel"], fg=THEME["muted"]).pack(anchor=tk.W, padx=16, pady=(14, 2))
+        e_title = tk.Entry(win, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT)
+        e_title.pack(fill=tk.X, padx=16, ipady=5)
+        tk.Label(win, text="Descrição / diretriz", bg=THEME["panel"], fg=THEME["muted"]).pack(anchor=tk.W, padx=16, pady=(10, 2))
+        e_text = tk.Text(win, height=8, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT, wrap=tk.WORD, padx=6, pady=6)
+        e_text.pack(fill=tk.BOTH, expand=True, padx=16)
+
+        def save():
+            title, content = e_title.get().strip(), e_text.get("1.0", tk.END).strip()
+            if not title:
+                return
+            if any(s["title"].lower() == title.lower() for s in self.all_skills()):
+                messagebox.showwarning("Skill", "Já existe uma skill com esse título.", parent=win)
+                return
+            sk = {"type": "SKILL", "title": title, "content": content}
+            self.custom_skills.append(sk)
+            write_json(LOCAL_SKILLS_FILE, self.custom_skills)
+            self.refresh_skills()
+            win.destroy()
+            if self.is_admin:
+                self.bg(lambda: self.api.call("POST", "/api/skills", sk), None)
+
+        self.btn(win, "Guardar", save, THEME["accent"]).pack(pady=10)
+
+    def delete_skill(self):
+        sel = self.skill_tree.selection()
+        if not sel:
+            return
+        s = self.skill_rows[int(sel[0])]
+        if s["origin"] != "personalizada":
+            messagebox.showinfo("Skill", "As skills integradas fazem parte da app e não se apagam.", parent=self)
+            return
+        self.custom_skills = [x for x in self.custom_skills if x["title"] != s["title"]]
+        write_json(LOCAL_SKILLS_FILE, self.custom_skills)
+        self.refresh_skills()
+        self.show_skill()
+
+    def export_skills(self):
+        path = filedialog.asksaveasfilename(initialfile="gois_skills.json", defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if path:
+            write_json(Path(path), [{k: v for k, v in s.items() if k != "origin"} for s in self.all_skills()])
+            self.flash(f"💾 {path}", THEME["bot"])
+
+    def sync_skills(self):
+        """Repõe no servidor o que ele perdeu e traz para aqui o que só lá existe."""
+        if not self.is_admin:
+            self.flash("Sincronização precisa do token de admin (⚙).", THEME["warn"])
+            return
+        local = self.all_skills()
+
+        def work():
+            server = self.api.call("GET", "/api/skills")
+            have = {s.get("title") for s in server}
+            missing = [{"type": s.get("type", "SKILL"), "title": s["title"], "content": s.get("content", "")}
+                       for s in local if s["title"] not in have]
+            for i in range(0, len(missing), 40):
+                self.api.call("POST", "/api/skills/bulk", {"skills": missing[i:i + 40]}, timeout=60)
+            mine = {s["title"] for s in local}
+            return len(missing), [s for s in server if s.get("title") and s["title"] not in mine]
+
+        def done(res, err):
+            if err:
+                self.flash(f"Skills: {err}", THEME["danger"])
+                return
+            up, new = res
+            for s in new:
+                self.custom_skills.append({"type": s.get("type", "SKILL"), "title": s["title"], "content": s.get("content", "")})
+            if new:
+                write_json(LOCAL_SKILLS_FILE, self.custom_skills)
+                self.refresh_skills()
+            self.flash(f"✅ Skills sincronizadas (↑{up} ↓{len(new)})", THEME["bot"])
+
+        self.bg(work, done)
+
+    # ======================================================================= #
+    # COMPARAÇÃO LIVE
+    # ======================================================================= #
+    MODELS = (("gois", "gois.v1", "gois_score"), ("gemini", "Gemini", "gemini_ref"), ("deepseek", "DeepSeek", "deepseek_ref"))
+
+    def cat_data(self):
+        return (self.server_settings.get("comparison") or {}).get("categories") or {}
+
+    def totals(self):
+        cats = self.cat_data()
+
+        def avg(key):
+            v = [e[key] for e in cats.values() if isinstance(e, dict) and e.get(key) is not None]
+            return (round(sum(v) / len(v), 1), len(v)) if v else (None, 0)
+
+        return {k: avg(f) for k, _n, f in self.MODELS}
+
+    def leadership(self):
+        """(categorias em que o gois.v1 lidera, categorias comparáveis)"""
+        wins = total = 0
+        for e in self.cat_data().values():
+            g = e.get("gois_score")
+            refs = [e.get("gemini_ref"), e.get("deepseek_ref")]
+            refs = [r for r in refs if r is not None]
+            if g is not None and refs:
+                total += 1
+                wins += g >= max(refs)
+        return wins, total
+
+    def live_interval(self):
+        try:
+            return max(3, int(self.live_s.get()))
+        except Exception:
+            return 10
+
+    def build_comparison_tab(self):
+        t = self.tab_comp
+        top = tk.Frame(t, bg=THEME["bg"])
+        top.pack(fill=tk.X, padx=18, pady=(12, 2))
+        tk.Label(top, text="Comparação ao vivo", bg=THEME["bg"], fg=THEME["fg"], font=("Segoe UI Semibold", 13)).pack(side=tk.LEFT)
+        self.cmp_stamp = tk.Label(top, text="", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9))
+        self.cmp_stamp.pack(side=tk.LEFT, padx=12)
+        self.btn(top, "⬇ CSV", self.export_comparison_csv).pack(side=tk.RIGHT, padx=3)
+        self.bench_all_btn = self.btn(top, "⚔ Benchmark às 16", self.bench_all)
+        self.bench_all_btn.pack(side=tk.RIGHT, padx=3)
+        self.bench_btn = self.btn(top, "⚔ Benchmark da categoria", self.run_benchmark_ui, THEME["accent_blue"])
+        self.bench_btn.pack(side=tk.RIGHT, padx=3)
+
+        ctl = tk.Frame(t, bg=THEME["bg"])
+        ctl.pack(fill=tk.X, padx=18, pady=(2, 0))
+        for key, name, _f in self.MODELS:
+            tk.Label(ctl, text="■", fg=series_color(key), bg=THEME["bg"]).pack(side=tk.LEFT)
+            tk.Label(ctl, text=name + "   ", fg=THEME["muted"], bg=THEME["bg"], font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        cb = ttk.Combobox(ctl, textvariable=self.live_s, values=["5", "10", "30", "60"], width=4, state="readonly")
+        cb.pack(side=tk.RIGHT)
+        cb.bind("<<ComboboxSelected>>", lambda _e: (self.cfg.__setitem__("live_s", self.live_interval()), self.save_config()))
+        tk.Label(ctl, text="Atualizar a cada (s):", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=(12, 4))
+        tk.Checkbutton(ctl, text="🔁 benchmark contínuo (gasta tokens)", variable=self.auto_bench, bg=THEME["bg"], fg=THEME["muted"],
+                       selectcolor=THEME["code_bg"], activebackground=THEME["bg"], activeforeground=THEME["fg"],
+                       font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=8)
+        tk.Label(t, text="Notas 0–100 dadas por um modelo-juiz (LLM) a respostas anónimas à mesma pergunta; Gemini e DeepSeek são chamados "
+                         "de verdade pelo servidor. São indicativas, não um teste oficial.", bg=THEME["bg"], fg=THEME["muted"],
+                 font=("Segoe UI", 8), anchor=tk.W, justify=tk.LEFT, wraplength=1200).pack(fill=tk.X, padx=18, pady=(2, 0))
+
+        pw = tk.PanedWindow(t, orient=tk.VERTICAL, bg=THEME["border"], sashwidth=4)
+        pw.pack(fill=tk.BOTH, expand=True, padx=18, pady=8)
+        upper = tk.Frame(pw, bg=THEME["bg"])
+        pw.add(upper, minsize=300, height=400)
+        left = tk.Frame(upper, bg=THEME["bg"])
+        left.pack(side=tk.LEFT, fill=tk.Y)
+        c1 = self.card(left)
+        c1.pack(fill=tk.X, pady=(0, 8))
+        self.cv_overall = tk.Canvas(c1, width=400, height=200, bg=THEME["panel"], highlightthickness=0)
+        self.cv_overall.pack(fill=tk.X)
+        c2 = self.card(left)
+        c2.pack(fill=tk.BOTH, expand=True)
+        self.cv_trend = tk.Canvas(c2, width=400, height=190, bg=THEME["panel"], highlightthickness=0)
+        self.cv_trend.pack(fill=tk.BOTH, expand=True)
+        c3 = self.card(upper)
+        c3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        vs = ttk.Scrollbar(c3, orient="vertical")
+        self.cv_cats = tk.Canvas(c3, bg=THEME["panel"], highlightthickness=0, yscrollcommand=vs.set)
+        vs.config(command=self.cv_cats.yview)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        self.cv_cats.pack(fill=tk.BOTH, expand=True)
+        self.cv_cats.bind("<MouseWheel>", lambda e: self.cv_cats.yview_scroll(int(-e.delta / 120), "units"))
+        self.cv_overall.bind("<Configure>", lambda _e: self.draw_overall())
+        self.cv_trend.bind("<Configure>", lambda _e: self.draw_trend())
+        self.cv_cats.bind("<Configure>", lambda _e: self.draw_cats())
+
+        tf = tk.Frame(pw, bg=THEME["panel"])
+        pw.add(tf, minsize=140)
+        cols = ("n", "cat", "gois", "gem", "ds", "dg", "dd", "les", "bm", "last")
+        heads = (("n", 36, "#"), ("cat", 330, "Categoria"), ("gois", 75, "gois.v1"), ("gem", 75, "Gemini"), ("ds", 80, "DeepSeek"),
+                 ("dg", 90, "Δ vs Gemini"), ("dd", 100, "Δ vs DeepSeek"), ("les", 60, "Lições"), ("bm", 85, "Benchmarks"), ("last", 130, "Último"))
+        self.comp_tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="browse")
+        for c, w, txt in heads:
+            self.comp_tree.heading(c, text=txt)
+            self.comp_tree.column(c, width=w, anchor=tk.W if c in ("cat", "last") else tk.CENTER)
+        self.comp_tree.tag_configure("lead", foreground=THEME["bot"])
+        tv = ttk.Scrollbar(tf, orient="vertical", command=self.comp_tree.yview)
+        self.comp_tree.configure(yscrollcommand=tv.set)
+        tv.pack(side=tk.RIGHT, fill=tk.Y)
+        self.comp_tree.pack(fill=tk.BOTH, expand=True)
+        for i, c in enumerate(DEFAULT_CATEGORIES):
+            self.comp_tree.insert("", tk.END, iid=str(i), values=(i + 1, c, "—", "—", "—", "—", "—", 0, 0, ""))
+        self.comp_tree.bind("<<TreeviewSelect>>", self.on_comp_select)
+        self.update_comparison_ui()
+
+    def on_comp_select(self, _e=None):
+        c = self.selected_comp_category()
+        if c != self.sel_cat:
+            self.sel_cat = c
+            self.draw_cats()
+
+    @staticmethod
+    def fnum(v, nd=1):
+        return "—" if v is None else f"{v:.{nd}f}"
+
+    @staticmethod
+    def fdelta(a, b):
+        return "—" if a is None or b is None else f"{a - b:+.1f}"
+
+    def update_comparison_ui(self):
+        if not hasattr(self, "comp_tree"):
+            return
+        try:
+            cats = self.cat_data()
+            for i, c in enumerate(DEFAULT_CATEGORIES):
+                e = cats.get(c) or {}
+                g, gm, ds = e.get("gois_score"), e.get("gemini_ref"), e.get("deepseek_ref")
+                refs = [x for x in (gm, ds) if x is not None]
+                lead = g is not None and refs and g >= max(refs)
+                last = str(e.get("last_benchmark") or "")[:16].replace("T", " ")
+                self.comp_tree.item(str(i), tags=("lead",) if lead else (), values=(
+                    i + 1, c, self.fnum(g), self.fnum(gm), self.fnum(ds), self.fdelta(g, gm), self.fdelta(g, ds),
+                    e.get("lessons", 0), e.get("benchmarks", 0), last))
+            self.draw_all_charts()
+        except tk.TclError:
+            pass
+
+    # ---- gráficos (Canvas) ----
+    def _cv_ready(self, cv):
+        try:
+            cv.delete("all")
+            return cv.winfo_width() > 80 and cv.winfo_height() > 80
+        except tk.TclError:
+            return False
+
+    def draw_all_charts(self):
+        self.draw_overall()
+        self.draw_trend()
+        self.draw_cats()
+
+    def draw_overall(self):
+        cv = getattr(self, "cv_overall", None)
+        if cv is None or not self._cv_ready(cv):
+            return
+        w, h = cv.winfo_width(), cv.winfo_height()
+        cv.create_text(14, 14, text="Total geral por modelo", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 10))
+        wins, total = self.leadership()
+        sub = f"gois.v1 lidera em {wins} de {total} categorias comparáveis" if total else "ainda sem benchmarks — corre um benchmark"
+        cv.create_text(14, 30, text=sub, anchor="w", fill=THEME["muted"], font=("Segoe UI", 8))
+        left, right, top, bottom = 38, w - 16, 48, h - 26
+        for v in (0, 25, 50, 75, 100):
+            y = bottom - (bottom - top) * v / 100
+            cv.create_line(left, y, right, y, fill=THEME["border"])
+            cv.create_text(left - 6, y, text=str(v), anchor="e", fill=THEME["muted"], font=("Segoe UI", 8))
+        tot = self.totals()
+        slot = (right - left) / 3
+        bw = min(56, slot * 0.5)
+        for i, (key, name, _f) in enumerate(self.MODELS):
+            val, _n = tot[key]
+            cx = left + slot * (i + 0.5)
+            if val is not None:
+                y = bottom - (bottom - top) * val / 100
+                cv.create_rectangle(cx - bw / 2, y, cx + bw / 2, bottom, fill=series_color(key), outline="")
+                cv.create_text(cx, y - 9, text=f"{val:.1f}%", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
+            else:
+                cv.create_rectangle(cx - bw / 2, bottom - 2, cx + bw / 2, bottom, fill=THEME["border"], outline="")
+                cv.create_text(cx, bottom - 12, text="—", fill=THEME["muted"])
+            cv.create_text(cx, bottom + 13, text=name, fill=THEME["muted"], font=("Segoe UI", 9))
+
+    def draw_trend(self):
+        cv = getattr(self, "cv_trend", None)
+        if cv is None or not self._cv_ready(cv):
+            return
+        w, h = cv.winfo_width(), cv.winfo_height()
+        cv.create_text(14, 14, text="Evolução dos totais (histórico local)", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 10))
+        pts = self.history[-150:]
+        if len(pts) < 2:
+            cv.create_text(w / 2, h / 2, text="A recolher histórico…\ncada alteração dos totais fica guardada aqui.",
+                           fill=THEME["muted"], font=("Segoe UI", 9), justify=tk.CENTER)
+            return
+        keys = [k for k, _n, _f in self.MODELS]
+        vals = [p[k] for p in pts for k in keys if p.get(k) is not None]
+        if not vals:
+            return
+        lo = max(0, int(min(vals)) - 5)
+        hi = min(100, int(max(vals)) + 5)
+        if hi - lo < 10:
+            hi = min(100, lo + 10)
+            lo = max(0, hi - 10)
+        left, right, top, bottom = 38, w - 16, 34, h - 26
+        t0, t1 = pts[0]["t"], pts[-1]["t"]
+        span = max(t1 - t0, 1)
+
+        def X(t):
+            return left + (right - left) * (t - t0) / span
+
+        def Y(v):
+            return bottom - (bottom - top) * (v - lo) / (hi - lo)
+
+        for v in (lo, (lo + hi) / 2, hi):
+            cv.create_line(left, Y(v), right, Y(v), fill=THEME["border"])
+            cv.create_text(left - 6, Y(v), text=f"{v:.0f}", anchor="e", fill=THEME["muted"], font=("Segoe UI", 8))
+        fmt = "%H:%M" if span < 86400 else "%d/%m"
+        cv.create_text(left, bottom + 13, text=time.strftime(fmt, time.localtime(t0)), anchor="w", fill=THEME["muted"], font=("Segoe UI", 8))
+        cv.create_text(right, bottom + 13, text=time.strftime(fmt, time.localtime(t1)), anchor="e", fill=THEME["muted"], font=("Segoe UI", 8))
+        for key in keys:
+            col, seg = series_color(key), []
+
+            def flush():
+                if len(seg) >= 4:
+                    cv.create_line(*seg, fill=col, width=2)
+
+            for p in pts:
+                v = p.get(key)
+                if v is None:
+                    flush()
+                    seg = []
+                else:
+                    seg += [X(p["t"]), Y(v)]
+            flush()
+            last = next((p for p in reversed(pts) if p.get(key) is not None), None)
+            if last:
+                cv.create_oval(X(last["t"]) - 3, Y(last[key]) - 3, X(last["t"]) + 3, Y(last[key]) + 3, fill=col, outline="")
+
+    def draw_cats(self):
+        cv = getattr(self, "cv_cats", None)
+        if cv is None:
+            return
+        try:
+            cv.delete("all")
+            w = cv.winfo_width()
+        except tk.TclError:
+            return
+        if w < 120:
+            return
+        cats = self.cat_data()
+        row_h, top = 46, 40
+        label_w = min(300, int(w * 0.36))
+        left, right = label_w + 14, w - 52
+        total_h = top + row_h * len(DEFAULT_CATEGORIES) + 8
+        cv.config(scrollregion=(0, 0, w, total_h))
+        cv.create_text(14, 16, text="Por categoria", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 10))
+        for v in (0, 25, 50, 75, 100):
+            x = left + (right - left) * v / 100
+            cv.create_line(x, top - 8, x, total_h - 6, fill=THEME["border"])
+            cv.create_text(x, top - 16, text=str(v), fill=THEME["muted"], font=("Segoe UI", 8))
+        for i, c in enumerate(DEFAULT_CATEGORIES):
+            y0 = top + i * row_h
+            if c == self.sel_cat:
+                cv.create_rectangle(0, y0 - 3, w, y0 + row_h - 5, fill=THEME["panel_alt"], outline="")
+            name = c if len(c) <= 46 else c[:45] + "…"
+            cv.create_text(12, y0 + row_h / 2 - 3, text=f"{i + 1}. {name}", anchor="w", width=label_w, fill=THEME["fg"], font=("Segoe UI", 9))
+            e = cats.get(c) or {}
+            for j, (key, _n, field) in enumerate(self.MODELS):
+                v = e.get(field)
+                by = y0 + 3 + j * 12
+                if v is None:
+                    cv.create_line(left, by + 4, left + 6, by + 4, fill=THEME["border"], width=2)
+                    continue
+                x = left + (right - left) * v / 100
+                cv.create_rectangle(left, by, x, by + 9, fill=series_color(key), outline="")
+                cv.create_text(x + 5, by + 4, text=f"{v:.0f}", anchor="w", fill=THEME["muted"], font=("Segoe UI", 7))
+
+    # ---- benchmarks ----
+    def selected_comp_category(self):
+        sel = self.comp_tree.selection()
+        return DEFAULT_CATEGORIES[int(sel[0])] if sel else None
+
+    def run_benchmark(self, cat, then=None):
+        if self.class_busy:
+            return False
+        self.set_class_busy(True, f"⚔️ Benchmark em [{cat}] (gois.v1 vs Gemini vs DeepSeek, ~30–90 s)…")
+
+        def done(res, err):
+            self.set_class_busy(False)
+            if err:
+                self.class_log(f"❌ Erro no benchmark [{cat}]: {err}")
+                return
+            b = res.get("benchmark", {})
+            self.class_log(f"🏆 [{cat}] em {b.get('elapsed_s', '?')}s: gois.v1 {self.fnum(b.get('gois_score'))}% · "
+                           f"Gemini {self.fnum(b.get('gemini_ref'))}% · DeepSeek {self.fnum(b.get('deepseek_ref'))}%")
+            if isinstance(res.get("settings"), dict):
+                self.apply_settings(res["settings"])
+            if then:
+                then()
+
+        self.bg(lambda: self.api.call("POST", "/api/comparison/benchmark", {"category": cat}, timeout=240), done)
+        return True
+
+    def run_benchmark_ui(self):
+        if not self.require_admin_ui():
+            return
+        cat = self.selected_comp_category()
+        if not cat:
+            messagebox.showinfo("Benchmark", "Seleciona primeiro uma categoria na tabela.", parent=self)
+            return
+        self.run_benchmark(cat)
+
+    def bench_all(self):
+        if not self.require_admin_ui() or self.class_busy:
+            return
+        if not messagebox.askyesno("Benchmark às 16 categorias",
+                                   "Corre 16 benchmarks seguidos (cada um usa vários pedidos aos modelos e demora ~1 min). Continuar?", parent=self):
+            return
+        pending = list(DEFAULT_CATEGORIES)
+
+        def step():
+            tok = self.server_settings.get("tokens") or {}
+            if tok.get("limit_reached"):
+                self.class_log("⛔ Limite diário de tokens atingido — benchmark em série parado.")
+                return
+            if pending:
+                self.run_benchmark(pending.pop(0), then=step)
+            else:
+                self.class_log("🏁 Benchmark às 16 categorias concluído.")
+
+        step()
+
+    def on_auto_bench(self):
         pass
-    root = tk.Tk()
-    GoisWindow(root)
-    root.mainloop()
+
+    def bench_tick(self):
+        self._bench_after = self.after(90_000, self.bench_tick)
+        if not (self.auto_bench.get() and self.is_admin and not self.class_busy):
+            return
+        tok = self.server_settings.get("tokens") or {}
+        if tok.get("limit_reached") or tok.get("auto_paused_by_limit"):
+            return
+        cats = self.cat_data()
+
+        def key(c):
+            e = cats.get(c) or {}
+            return (e.get("benchmarks") or 0, str(e.get("last_benchmark") or ""))
+
+        self.run_benchmark(min(DEFAULT_CATEGORIES, key=key))
+
+    def export_comparison_csv(self):
+        path = filedialog.asksaveasfilename(initialfile="comparacao_gois_gemini_deepseek.csv", defaultextension=".csv",
+                                            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        cats = self.cat_data()
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            wr = csv.writer(f, delimiter=";")
+            wr.writerow(["Categoria", "gois.v1", "Gemini", "DeepSeek", "Δ vs Gemini", "Δ vs DeepSeek", "Lições", "Benchmarks", "Último benchmark"])
+            for c in DEFAULT_CATEGORIES:
+                e = cats.get(c) or {}
+                g, gm, ds = e.get("gois_score"), e.get("gemini_ref"), e.get("deepseek_ref")
+                wr.writerow([c, g, gm, ds, self.fdelta(g, gm), self.fdelta(g, ds), e.get("lessons", 0), e.get("benchmarks", 0), e.get("last_benchmark") or ""])
+            tot = self.totals()
+            wr.writerow(["TOTAL GERAL", tot["gois"][0], tot["gemini"][0], tot["deepseek"][0]])
+        self.flash(f"💾 {path}", THEME["bot"])
+
+    # ---- live ----
+    def fetch_live(self):
+        if self._live_busy or not self.is_admin:
+            return
+        self._live_busy = True
+
+        def work():
+            t0 = time.time()
+            s = self.api.call("GET", "/api/settings", timeout=30)
+            return s, int((time.time() - t0) * 1000)
+
+        def done(res, err):
+            self._live_busy = False
+            if err:
+                self.refresh_live_ui()
+                return
+            s, ms = res
+            self.latency_ms = ms
+            self.apply_settings(s)
+            if (s.get("comparison") or {}).get("lessons_total", 0) > len(self.kb):
+                self.refresh_classroom()
+
+        self.bg(work, done)
+
+    def live_tick(self):
+        self._live_after = self.after(self.live_interval() * 1000, self.live_tick)
+        if self.is_admin and not self.class_busy:
+            self.fetch_live()
+
+    def clock_tick(self):
+        self.refresh_live_ui()
+        self.after(1000, self.clock_tick)
+
+    def record_history(self):
+        tot = self.totals()
+        snap = {"t": time.time(), **{k: tot[k][0] for k in tot}}
+        if all(snap[k] is None for k in tot):
+            return
+        last = self.history[-1] if self.history else None
+        same = last and all(last.get(k) == snap[k] for k in tot)
+        if same and snap["t"] - last["t"] < 900:
+            return
+        self.history.append(snap)
+        self.history = self.history[-500:]
+        write_json(HISTORY_FILE, self.history)
+
+    def refresh_live_ui(self):
+        try:
+            if not self.connected:
+                txt, col = "● offline", THEME["danger"]
+            elif not self.is_admin:
+                txt, col = "● sem admin · dados em cache", THEME["warn"]
+            else:
+                age = time.time() - self.last_live if self.last_live else None
+                if age is None:
+                    txt, col = "● a sincronizar…", THEME["warn"]
+                elif age <= self.live_interval() * 2 + 5:
+                    txt, col = f"● LIVE · há {int(age)} s", THEME["bot"]
+                else:
+                    txt, col = f"● atrasado · há {int(age)} s", THEME["warn"]
+            self.live_lbl.config(text=txt, fg=col)
+            self.cmp_stamp.config(text=txt, fg=col)
+            lat = f"{self.latency_ms} ms" if self.latency_ms is not None else "—"
+            adm = ("🛡 Administrador" if is_windows_admin() else "sem Administrador") if sys.platform == "win32" else ""
+            self.foot_r.config(text=f"Latência {lat}  ·  {adm}  ·  v{APP_VERSION}")
+        except tk.TclError:
+            pass
+
+    def update_kpis(self):
+        try:
+            tot = self.totals()
+            comp = self.server_settings.get("comparison") or {}
+            tok = self.server_settings.get("tokens") or {}
+            nc = len(DEFAULT_CATEGORIES)
+            for k, _n, _f in self.MODELS:
+                v, n = tot[k]
+                self.kpi[k][0].config(text="—" if v is None else f"{v:.1f} %")
+                self.kpi[k][1].config(text=f"{n}/{nc} categorias medidas")
+            pg, pd = comp.get("parity_vs_gemini"), comp.get("parity_vs_deepseek")
+            self.kpi["par_gem"][0].config(text=f"{pg} %" if pg else "—")
+            self.kpi["par_gem"][1].config(text="gois.v1 ÷ Gemini")
+            self.kpi["par_ds"][0].config(text=f"{pd} %" if pd else "—")
+            self.kpi["par_ds"][1].config(text="gois.v1 ÷ DeepSeek")
+            self.kpi["lessons"][0].config(text=str(comp.get("lessons_total", len(self.kb))))
+            self.kpi["lessons"][1].config(text="na Sala de Aula")
+            self.kpi["skills"][0].config(text=str(len(self.all_skills())))
+            self.kpi["skills"][1].config(text=f"{len(BUILTIN_SKILLS)} integradas")
+            used = int(tok.get("used_today", 0) or 0)
+            self.kpi["tokens"][0].config(text=f"{used:,}".replace(",", "."))
+            self.kpi["tokens"][1].config(text="limite " + (f"{int(tok.get('daily_limit', 0)):,}".replace(",", ".") if tok.get("daily_limit") else "∞"))
+        except (tk.TclError, KeyError):
+            pass
+
+    # ---- aba Sistema ----
+    def build_system_tab(self):
+        t = self.tab_sys
+        top = tk.Frame(t, bg=THEME["bg"])
+        top.pack(fill=tk.X, padx=18, pady=(12, 6))
+        tk.Label(top, text="Sistema & Diagnóstico", bg=THEME["bg"], fg=THEME["fg"], font=("Segoe UI Semibold", 13)).pack(side=tk.LEFT)
+        self.btn(top, "📁 Abrir pasta de dados", self.open_data_dir).pack(side=tk.RIGHT, padx=3)
+        self.btn(top, "⬆ Sincronizar skills", self.sync_skills).pack(side=tk.RIGHT, padx=3)
+        self.btn(top, "🔄 Reconectar", self.check_connection, THEME["accent_blue"]).pack(side=tk.RIGHT, padx=3)
+        f = self.card(t)
+        f.pack(fill=tk.BOTH, expand=True, padx=18, pady=8)
+        self.sys_tree = ttk.Treeview(f, columns=("k", "v"), show="headings", selectmode="none")
+        self.sys_tree.heading("k", text="Item")
+        self.sys_tree.heading("v", text="Valor")
+        self.sys_tree.column("k", width=260, anchor=tk.W)
+        self.sys_tree.column("v", width=800, anchor=tk.W)
+        self.sys_tree.pack(fill=tk.BOTH, expand=True)
+        self.refresh_system_tab()
+
+    def open_data_dir(self):
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(str(DATA_DIR))  # noqa
+            else:
+                subprocess.Popen(["xdg-open", str(DATA_DIR)])
+        except Exception as e:
+            self.flash(f"❌ {e}", THEME["danger"])
+
+    def refresh_system_tab(self):
+        tree = getattr(self, "sys_tree", None)
+        if tree is None:
+            return
+        try:
+            s, h = self.server_settings or {}, self.health or {}
+            tok = s.get("tokens") or {}
+            if not self.connected:
+                mode = "Offline"
+            elif self.admin_configured is False:
+                mode = "Público — o servidor não tem ADMIN_TOKEN"
+            elif self.is_admin:
+                mode = "Administrador (token válido)"
+            else:
+                mode = "Token inválido"
+            rows = [
+                ("Servidor", self.cfg.get("server", "")),
+                ("Estado da ligação", "Online" if self.connected else "Offline"),
+                ("Latência do último pedido", f"{self.latency_ms} ms" if self.latency_ms is not None else "—"),
+                ("Versão do servidor", h.get("version", "—")),
+                ("Modo de acesso", mode),
+                ("Skills (neste PC / no servidor)", f"{len(self.all_skills())} / {h.get('skills', '—')}"),
+                ("Lições (neste PC / no servidor)", f"{len(self.kb_cache)} / {h.get('lessons', '—')}"),
+                ("Fornecedores com chave", ", ".join(s.get("providers_with_key", [])) or "—"),
+                ("Professor atual", s.get("current_teacher") or "—"),
+                ("Modo autónomo", "ligado" if s.get("learning_now") else "desligado"),
+                ("Tokens hoje / limite / total", f"{tok.get('used_today', 0)} / {tok.get('daily_limit', 0) or '∞'} / {tok.get('used_total', 0)}"),
+                ("Último erro do servidor", s.get("last_error") or "—"),
+                ("Windows como Administrador", ("sim" if is_windows_admin() else "não") if sys.platform == "win32" else "n/a"),
+                ("Arrastar ficheiros (windnd)", "ativo" if windnd else "não instalado"),
+                ("Pasta de dados", str(DATA_DIR)),
+                ("Aplicação / Python", f"gois_window {APP_VERSION} · Python {sys.version.split()[0]} · Tk {tk.TkVersion}"),
+            ]
+            tree.delete(*tree.get_children())
+            for i, (k, v) in enumerate(rows):
+                tree.insert("", tk.END, iid=str(i), values=(k, v))
+        except tk.TclError:
+            pass
+
+    # ======================================================================= #
+    # SALA DE AULA
+    # ======================================================================= #
+    def build_classroom_tab(self):
+        top = tk.Frame(self.tab_class, bg=THEME["bg"])
+        top.pack(fill=tk.X, padx=20, pady=(14, 4))
+        tk.Label(top, text="🏫 Sala de Aula Autónoma", bg=THEME["bg"], fg=THEME["fg"], font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
+        self.class_status = tk.Label(self.tab_class, text="Sala de Aula: a verificar…", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT)
+        self.class_status.pack(fill=tk.X, padx=20)
+        self.tokens_lbl = tk.Label(self.tab_class, text="🔋 Tokens hoje: —", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), anchor=tk.W)
+        self.tokens_lbl.pack(fill=tk.X, padx=20)
+
+        ctrl = tk.Frame(self.tab_class, bg=THEME["bg"])
+        ctrl.pack(fill=tk.X, padx=20, pady=6)
+        self.study_btn = self.btn(ctrl, "📚 Estudar categoria selecionada", self.study_selected, THEME["accent"])
+        self.study_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self.study_all_btn = self.btn(ctrl, "🎓 Estudar todas (1 lição cada)", self.study_all)
+        self.study_all_btn.pack(side=tk.LEFT, padx=6)
+        self.auto_btn = self.btn(ctrl, "▶ Modo autónomo: OFF", self.toggle_auto)
+        self.auto_btn.pack(side=tk.LEFT, padx=6)
+        tk.Label(ctrl, text="Limite/dia (0 = sem):", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(18, 4))
+        self.limit_var = tk.StringVar(value="0")
+        tk.Entry(ctrl, textvariable=self.limit_var, width=10, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT).pack(side=tk.LEFT, ipady=3)
+        self.btn(ctrl, "Guardar", self.save_daily_limit).pack(side=tk.LEFT, padx=4)
+
+        pw = tk.PanedWindow(self.tab_class, orient=tk.HORIZONTAL, bg=THEME["border"], sashwidth=4)
+        pw.pack(fill=tk.BOTH, expand=True, padx=20, pady=6)
+        left = tk.Frame(pw, bg=THEME["panel"])
+        pw.add(left, minsize=300)
+        self.cat_list = tk.Listbox(left, bg=THEME["panel"], fg=THEME["fg"], selectbackground=THEME["accent_blue"], selectforeground="#ffffff",
+                                   relief=tk.FLAT, highlightthickness=0, activestyle="none", font=("Segoe UI", 9), exportselection=False)
+        self.cat_list.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        for c in DEFAULT_CATEGORIES:
+            self.cat_list.insert(tk.END, f"  {c}  (0)")
+        self.cat_list.selection_set(0)
+
+        right = tk.PanedWindow(pw, orient=tk.VERTICAL, bg=THEME["border"], sashwidth=4)
+        pw.add(right, minsize=420)
+        kf = tk.Frame(right, bg=THEME["panel"])
+        right.add(kf, minsize=120)
+        self.kb_tree = ttk.Treeview(kf, columns=("cat", "titulo", "prof"), show="headings", selectmode="browse")
+        for c, w, txt in (("cat", 170, "Categoria"), ("titulo", 260, "Lição"), ("prof", 130, "Professor")):
+            self.kb_tree.heading(c, text=txt)
+            self.kb_tree.column(c, width=w, anchor=tk.W)
+        vs = ttk.Scrollbar(kf, orient="vertical", command=self.kb_tree.yview)
+        self.kb_tree.configure(yscrollcommand=vs.set)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        self.kb_tree.pack(fill=tk.BOTH, expand=True)
+        self.kb_tree.bind("<<TreeviewSelect>>", self.show_lesson)
+        self.lesson_text = tk.Text(right, height=8, bg=THEME["code_bg"], fg=THEME["fg"], font=("Segoe UI", 10), wrap=tk.WORD,
+                                   relief=tk.FLAT, padx=10, pady=8, state=tk.DISABLED)
+        right.add(self.lesson_text, minsize=100)
+        self.kb_rows = []
+
+        self.class_log_text = tk.Text(self.tab_class, height=5, bg=THEME["panel"], fg=THEME["muted"], font=("Consolas", 9), relief=tk.FLAT,
+                                      padx=8, pady=4, state=tk.DISABLED, wrap=tk.WORD)
+        self.class_log_text.pack(fill=tk.X, padx=20, pady=(0, 12))
+
+    def _append_log(self, entry):
+        try:
+            self.class_log_text.config(state=tk.NORMAL)
+            self.class_log_text.insert(tk.END, entry + "\n")
+            self.class_log_text.see(tk.END)
+            self.class_log_text.config(state=tk.DISABLED)
+        except tk.TclError:
+            pass
+
+    def class_log(self, line):
+        entry = time.strftime("%H:%M:%S ") + line
+        self.log_lines = (self.log_lines + [entry])[-300:]
+        self._append_log(entry)
+
+    def class_log_restore(self):
+        for e in self.log_lines[-80:]:
+            self._append_log(e)
+
+    def require_admin_ui(self):
+        if not self.connected:
+            messagebox.showwarning("Offline", "Sem ligação ao servidor. Espera que o indicador no topo fique verde.", parent=self)
+            return False
+        if not self.is_admin:
+            if self.admin_configured is False:
+                self.warn_no_token_once()
+                messagebox.showwarning("Admin", "O servidor não tem ADMIN_TOKEN definido (Render > Environment).", parent=self)
+            else:
+                messagebox.showwarning("Admin", "O token de administrador não é válido. Abre ⚙ Definições > 🔌 Testar ligação.", parent=self)
+            return False
+        return True
+
+    def set_class_busy(self, busy, msg=None):
+        self.class_busy = busy
+        st = tk.DISABLED if busy else tk.NORMAL
+        for b in (self.study_btn, self.study_all_btn, self.bench_btn, self.bench_all_btn):
+            b.config(state=st)
+        if msg:
+            self.class_log(msg)
+
+    def selected_class_category(self):
+        sel = self.cat_list.curselection()
+        return DEFAULT_CATEGORIES[sel[0]] if sel else DEFAULT_CATEGORIES[0]
+
+    def study_category(self, cat, then=None):
+        self.set_class_busy(True, f"⚡ A estudar [{cat}] com modelo real…")
+
+        def done(res, err):
+            self.set_class_busy(False)
+            if err:
+                self.class_log(f"❌ Erro: {err}")
+                return
+            les = res.get("lesson", {})
+            self.class_log(f"✅ Lição absorvida em [{cat}]: '{les.get('title', '?')}' (Professor: {les.get('teacher', '?')}) — Comparação % atualizada!")
+            self.refresh_classroom()
+            if then:
+                then()
+
+        self.bg(lambda: self.api.call("POST", "/api/classroom/learn", {"category": cat, "provider": "auto"}, timeout=150), done)
+
+    def study_selected(self):
+        if self.require_admin_ui() and not self.class_busy:
+            self.study_category(self.selected_class_category())
+
+    def study_all(self):
+        if not self.require_admin_ui() or self.class_busy:
+            return
+        queue_ = list(DEFAULT_CATEGORIES)
+
+        def step():
+            if queue_:
+                self.study_category(queue_.pop(0), then=step)
+            else:
+                self.class_log("🎓 Ronda completa: 1 lição por categoria.")
+
+        step()
+
+    def toggle_auto(self):
+        if not self.require_admin_ui():
+            return
+        new = not bool(self.server_settings.get("learning_now"))
+
+        def done(res, err):
+            if err:
+                self.class_log(f"❌ {err}")
+                return
+            self.class_log("▶ Modo autónomo LIGADO (1 lição por minuto, pelo servidor)." if new else "⏸ Modo autónomo desligado.")
+            self.apply_settings(res)
+
+        self.bg(lambda: self.api.call("POST", "/api/settings", {"learning_now": new}), done)
+
+    def save_daily_limit(self):
+        if not self.require_admin_ui():
+            return
+        raw = self.limit_var.get().strip().lower().replace(".", "").replace(",", "")
+        mult = 1
+        if raw.endswith("k"):
+            raw, mult = raw[:-1], 1_000
+        elif raw.endswith("m"):
+            raw, mult = raw[:-1], 1_000_000
+        try:
+            val = int(raw or 0) * mult
+        except ValueError:
+            messagebox.showwarning("Limite", "Número inválido (ex.: 200000 ou 200k).", parent=self)
+            return
+
+        def done(res, err):
+            self.class_log(f"❌ {err}" if err else f"🔋 Limite diário: {val or 'sem limite'} tokens.")
+            if not err:
+                self.apply_settings(res)
+
+        self.bg(lambda: self.api.call("POST", "/api/settings", {"daily_token_limit": val}), done)
+
+    def refresh_classroom(self):
+        if not self.is_admin:
+            return
+
+        def work():
+            settings = self.api.call("GET", "/api/settings")
+            server_kb = self.api.call("GET", "/api/knowledge")
+            ids = {k.get("id") for k in server_kb}
+            missing = [k for k in self.kb_cache if k.get("id") not in ids]
+            if missing:  # o servidor perdeu lições (restart no Render): repõe a partir da cópia local
+                self.api.call("POST", "/api/sync/import", {"knowledge": missing}, timeout=60)
+            merged = {k["id"]: k for k in self.kb_cache if k.get("id")}
+            merged.update({k["id"]: k for k in server_kb if k.get("id")})
+            return settings, sorted(merged.values(), key=lambda k: k.get("created", ""))
+
+        def done(res, err):
+            if err:
+                self.class_status.config(text=f"Servidor indisponível: {err}", fg=THEME["danger"])
+                return
+            settings, kb = res
+            self.kb = kb
+            self.kb_cache = kb
+            write_json(KNOWLEDGE_FILE, kb)
+            self.apply_settings(settings)
+            self.update_knowledge_ui()
+
+        self.bg(work, done)
+
+    def apply_settings(self, s, cached=False):
+        self.server_settings = s
+        if not cached:
+            write_json(COMP_CACHE_FILE, s)
+            self.last_live = time.time()
+            self.record_history()
+        comp = s.get("comparison", {})
+        tok = s.get("tokens", {})
+        auto = bool(s.get("learning_now"))
+        self.auto_btn.config(text="⏸ Modo autónomo: ON" if auto else "▶ Modo autónomo: OFF", bg=THEME["accent"] if auto else THEME["btn"],
+                             fg="#ffffff" if auto else THEME["fg"])
+        if not cached:
+            provs = ", ".join(s.get("providers_with_key", [])) or "NENHUM (configura chaves no Render)"
+            self.class_status.config(
+                text=f"Online · gois.v1 {comp.get('overall', 0)}% (Paridade Gemini {comp.get('parity_vs_gemini', 0)}% · DeepSeek {comp.get('parity_vs_deepseek', 0)}%) · "
+                     f"{comp.get('lessons_total', 0)} lições · Professor atual: {s.get('current_teacher') or '—'}\n"
+                     f"Fornecedores com chave: {provs}" + (f"\n⚠ Último erro: {s['last_error']}" if s.get("last_error") else ""),
+                fg=THEME["bot"])
+        used, lim = tok.get("used_today", 0), tok.get("daily_limit", 0)
+        extra = "  ⛔ limite atingido — modo autónomo pausado" if tok.get("auto_paused_by_limit") or tok.get("limit_reached") else ""
+        self.tokens_lbl.config(text=f"🔋 Tokens hoje: {used:,} / {lim:,}".replace(",", ".") + f"   ·   Total acumulado: {tok.get('used_total', 0):,}".replace(",", ".") + extra,
+                               fg=THEME["warn"] if extra else THEME["muted"])
+        if not self.limit_var.get().strip() or self.limit_var.get() == "0":
+            self.limit_var.set(str(lim))
+        cats = comp.get("categories", {})
+        sel = self.cat_list.curselection()
+        for i, c in enumerate(DEFAULT_CATEGORIES):
+            self.cat_list.delete(i)
+            self.cat_list.insert(i, f"  {c}  ({(cats.get(c) or {}).get('lessons', 0)})")
+        self.cat_list.selection_set(sel[0] if sel else 0)
+        self.update_comparison_ui()
+        self.update_kpis()
+        self.refresh_system_tab()
+        self.refresh_live_ui()
+
+    def update_knowledge_ui(self):
+        sel = self.kb_tree.selection()
+        self.kb_tree.delete(*self.kb_tree.get_children())
+        self.kb_rows = list(reversed(self.kb))
+        for i, k in enumerate(self.kb_rows):
+            self.kb_tree.insert("", tk.END, iid=str(i), values=(k.get("category", "")[:28], k.get("title", ""), k.get("teacher", "")))
+        if sel and sel[0] in self.kb_tree.get_children():
+            self.kb_tree.selection_set(sel[0])
+
+    def show_lesson(self, _e=None):
+        sel = self.kb_tree.selection()
+        self.lesson_text.config(state=tk.NORMAL)
+        self.lesson_text.delete("1.0", tk.END)
+        if sel and int(sel[0]) < len(self.kb_rows):
+            k = self.kb_rows[int(sel[0])]
+            self.lesson_text.insert(tk.END, f"{k.get('title', '')}\n[{k.get('category', '')} · {k.get('teacher', '')} · {k.get('created', '')}]\n\n{k.get('content', '')}")
+        self.lesson_text.config(state=tk.DISABLED)
 
 
 if __name__ == "__main__":
-    main()
+    if sys.platform == "win32" and "--no-elevate" not in sys.argv and not is_windows_admin():
+        if relaunch_as_admin():  # o utilizador aceitou o UAC: a nova instância (admin) continua daqui
+            sys.exit(0)
+    try:  # nitidez em ecrãs com escala > 100 %
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    GoisWindow().mainloop()
