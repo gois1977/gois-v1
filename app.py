@@ -1,7 +1,7 @@
 """gois.v1 API 6.0 - chat com failover, Sala de Aula, benchmark, skills e persistência.
 
 Variáveis de ambiente (Render > Environment):
-  ADMIN_TOKEN        palavra-passe do modo admin (obrigatória para o Command Center)
+  ADMIN_TOKEN        rnd_BzxO8mgYntvwKCv0I3ruBaROaPGJ
   GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY   (pelo menos uma)
   DATA_DIR           (opcional) pasta onde guardar gois_db.json
 """
