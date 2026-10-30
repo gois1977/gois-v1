@@ -1,7 +1,7 @@
 """gois.v1 API 6.0 - chat com failover, Sala de Aula, benchmark, skills e persistência.
 
 Variáveis de ambiente (Render > Environment):
-  ADMIN_TOKEN = "rnd_BzxO8mgYntvwKCv0I3ruBaROaPGJ"
+  ADMIN_TOKEN = "Vicente2013@"
   GROQ_API_KEY , GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY = "mstrl_DOpXZ4J0DCQ7Yz529abt08bMEewboLGj_3FzGnx"
   DATA_DIR           (opcional) pasta onde guardar gois_db.json
 """
