@@ -129,8 +129,27 @@ def flatten_content(content) -> str:
         return "\n".join(str(p.get("text", "") if isinstance(p, dict) else p) for p in content)
     return str(content)
 
+def prepare_messages(messages: list) -> list:
+    system_instruction = {
+        "role": "system",
+        "content": "Tu és o gois.v1, o modelo de inteligência artificial autónomo criado pelo programador. Nunca te identifies como ChatGPT, OpenAI ou outro assistente genérico. És estritamente o gois.v1."
+    }
+    cleaned = []
+    for m in messages:
+        if isinstance(m, dict):
+            role = m.get("role", "user")
+            content = flatten_content(m.get("content"))
+            if role and content:
+                cleaned.append({"role": role, "content": content})
+    if not cleaned:
+        cleaned = [{"role": "user", "content": "Olá"}]
+    cleaned = [m for m in cleaned if m.get("role") != "system"]
+    cleaned.insert(0, system_instruction)
+    return cleaned
+
 async def make_llm_request(payload: dict):
     errors = []
+    payload["messages"] = prepare_messages(payload.get("messages", []))
     timeout = httpx.Timeout(65.0, connect=15.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for p in PROVIDERS:
@@ -140,7 +159,7 @@ async def make_llm_request(payload: dict):
                 for model_name in p["models"]:
                     try:
                         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", **p["extra_headers"]}
-                        body = {"model": model_name, "messages": payload.get("messages", []), "temperature": payload.get("temperature", 0.6)}
+                        body = {"model": model_name, "messages": payload["messages"], "temperature": payload.get("temperature", 0.6)}
                         resp = await client.post(p["url"], json=body, headers=headers)
                         if resp.status_code == 200:
                             data = resp.json()
@@ -152,6 +171,7 @@ async def make_llm_request(payload: dict):
     return None, errors
 
 async def stream_llm_request(payload: dict):
+    payload["messages"] = prepare_messages(payload.get("messages", []))
     timeout = httpx.Timeout(120.0, connect=15.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for p in PROVIDERS:
@@ -162,7 +182,7 @@ async def stream_llm_request(payload: dict):
                     got_content = False
                     try:
                         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", **p["extra_headers"]}
-                        body = {"model": model_name, "messages": payload.get("messages", []), "temperature": payload.get("temperature", 0.6), "stream": True}
+                        body = {"model": model_name, "messages": payload["messages"], "temperature": payload.get("temperature", 0.6), "stream": True}
                         async with client.stream("POST", p["url"], json=body, headers=headers) as resp:
                             if resp.status_code != 200: continue
                             sent_model = False
@@ -195,7 +215,7 @@ async def stream_llm_request(payload: dict):
 async def lifespan(_: FastAPI):
     yield
 
-app = FastAPI(title="gois.v1 Professional Workspace & API", version="3.5.0", lifespan=lifespan)
+app = FastAPI(title="gois.v1 Professional Workspace & API", version="3.7.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
