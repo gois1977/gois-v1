@@ -486,7 +486,7 @@ class GoisWindow:
         self.scroll.pack(side="right", fill="y")
         self.log = tk.Text(
             body, wrap="word", state="disabled", bg=T["bg"], fg=T["fg"], bd=0, relief="flat",
-            font=FONT_UI, padx=18, pady=12, insertbackground=T["fg"], spacing1=2, spacing3=2,
+            font=FONT_UI, padx=18, pady=18, insertbackground=T["fg"], spacing1=2, spacing3=4,
             selectbackground="#264f78", highlightthickness=0, yscrollcommand=self.scroll.set,
         )
         self.log.pack(side="left", fill="both", expand=True)
@@ -545,7 +545,6 @@ class GoisWindow:
         self.btn_study_selected.pack(side="right", padx=4)
         self.make_button(head, "🔄 Atualizar Live", self.refresh_classroom_from_server, padx=10, pady=4).pack(side="right", padx=4)
 
-        # Cartões KPI Globais
         kpis = tk.Frame(top_card, bg=T["panel"])
         kpis.pack(fill="x", padx=14, pady=(4, 10))
         for i in range(4):
@@ -573,7 +572,6 @@ class GoisWindow:
         )
         self.lbl_comp_feedback.pack(fill="x", padx=18, pady=(0, 8))
 
-        # Tabela / Lista interativa das 16 categorias + Painel de Detalhe Visual
         body = tk.Frame(parent, bg=T["bg"])
         body.pack(fill="both", expand=True, padx=14, pady=(0, 12))
 
@@ -893,9 +891,6 @@ class GoisWindow:
         finally:
             w.configure(state="disabled")
 
-    def at_bottom(self) -> bool:
-        return self.log.yview()[1] > 0.97
-
     def set_status(self, text: str, error: bool = False):
         self.status.config(text=text, fg=THEME["err"] if error else THEME["muted"])
 
@@ -939,7 +934,11 @@ class GoisWindow:
                 self.copy_text(m["content"])
                 return
 
-    # ---------- renderização Markdown ----------
+    # ---------- renderização Markdown e Auto-Scroll ----------
+    def scroll_chat_to_bottom(self):
+        self.log.see("end")
+        self.log.yview_moveto(1.0)
+
     def render_markdown_into(self, widget: tk.Text, text: str):
         for block in parse_markdown(text):
             if block[0] == "code":
@@ -966,11 +965,13 @@ class GoisWindow:
         with self.editable():
             self.log.insert("end", "Tu\n", "who_user")
             self.log.insert("end", text.strip() + "\n")
+        self.scroll_chat_to_bottom()
 
     def render_bot(self, text: str):
         with self.editable():
             self.log.insert("end", "gois.v1\n", "who_bot")
             self.render_markdown_into(self.log, text)
+        self.scroll_chat_to_bottom()
 
     def render_history(self):
         with self.editable():
@@ -989,12 +990,12 @@ class GoisWindow:
                 self.render_user(m["content"])
             else:
                 self.render_bot(m["content"])
-        self.log.see("end")
+        self.scroll_chat_to_bottom()
 
     def write_sys(self, text: str, error: bool = False):
         with self.editable():
             self.log.insert("end", text + "\n", "err" if error else "sys")
-        self.log.see("end")
+        self.scroll_chat_to_bottom()
 
     # ---------- Sala de Aula, Comparação % & Sincronização Inteligente ----------
     def initial_connect(self):
@@ -1171,7 +1172,7 @@ class GoisWindow:
         )
         txt.pack(side="left", fill="both", expand=True)
         scroll.config(command=txt.yview)
-        self.setup_text_tags(txt)
+        self.configure_markdown_tags(txt)
 
         guide_md = (
             "# Passo 1 — O que significam os 4 Cartões no Topo?\n"
@@ -1403,7 +1404,6 @@ class GoisWindow:
         )
 
     def reconcile_tokens(self, tks):
-        """Mantém o servidor alinhado: o Render (plano grátis) perde limite e contadores quando reinicia."""
         if not isinstance(tks, dict) or not tks:
             return
         payload = {}
@@ -1587,7 +1587,7 @@ class GoisWindow:
             self.ent_custom_topic.delete(0, "end")
             self.update_classroom_ui()
             self.update_comparison_ui()
-            self.set_status(f"Nova lição aprendida e comparação % atualizada!")
+            self.set_status("Nova lição aprendida e comparação % atualizada!")
 
         self.background(
             lambda: http_json(self.cfg["server"] + "/api/classroom/learn", payload, self.cfg["sync_token"], timeout=95),
@@ -1633,7 +1633,7 @@ class GoisWindow:
             try:
                 render = http_json(self.cfg["server"] + "/api/render/status", timeout=30)
             except Exception:
-                render = None  # servidor antigo, sem sincronização do Render
+                render = None
             return {"skills": skills, "keys": keys, "render": render}
 
         def done(res, err):
@@ -1865,7 +1865,7 @@ class GoisWindow:
         except Exception as e:
             messagebox.showerror("Exportar", f"Não foi possível guardar: {e}")
 
-    # ---------- Chat com Streaming SSE ----------
+    # ---------- Chat com Streaming SSE e Auto-Scroll Contínuo ----------
     def send(self):
         if self.streaming:
             return
@@ -1908,7 +1908,7 @@ class GoisWindow:
             self.log.insert("end", "gois.v1\n", "who_bot")
             self.log.mark_set("reply_start", "end-1c")
             self.log.mark_gravity("reply_start", "left")
-        self.log.see("end")
+        self.scroll_chat_to_bottom()
 
         limit = max(2, int(self.cfg["history"]))
         messages = self.history[-limit:]
@@ -1934,11 +1934,9 @@ class GoisWindow:
                 self.got_token = True
                 self.set_status("A responder...")
             self.reply_buf.append(value)
-            follow = self.at_bottom()
             with self.editable():
                 self.log.insert("end", value)
-            if follow:
-                self.log.see("end")
+            self.scroll_chat_to_bottom()
         elif kind == "done":
             self.finish_reply()
         elif kind == "error":
@@ -1958,7 +1956,6 @@ class GoisWindow:
         text = "".join(self.reply_buf).strip()
         if not text and not stopped and not error:
             error = "O modelo devolveu uma resposta vazia."
-        follow = self.at_bottom()
         with self.editable():
             self.log.delete("reply_start", "end-1c")
             self.log.mark_set("insert_at", "end-1c")
@@ -1990,8 +1987,7 @@ class GoisWindow:
         else:
             model = f"  ·  {self.reply_model}" if self.reply_model else ""
             self.set_status("Pronto" + model)
-        if follow:
-            self.log.see("end")
+        self.scroll_chat_to_bottom()
 
     # ---------- Definições ----------
     def open_settings(self):
