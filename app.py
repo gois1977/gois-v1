@@ -133,7 +133,7 @@ def prepare_messages(messages: list) -> list:
     system_instruction = {
         "role": "system",
         "content": (
-            "Tu és o gois.v1, o cérebro de engenharia avançada do painel de controlo do programador. "
+            "Tu és o gois.v1, o cérebro de engenharia avançada do painel de controlo. "
             "Modo de Operação: Mentor Técnico Metódico & Passo a Passo. "
             "1. Nunca te recuses a escrever código. Nunca te identifies como ChatGPT ou OpenAI. "
             "2. REGRA DE OURO: Nunca despejes soluções gigantes de uma só vez. "
@@ -224,7 +224,7 @@ async def stream_llm_request(payload: dict):
 async def lifespan(_: FastAPI):
     yield
 
-app = FastAPI(title="gois.v1 Professional Workspace & API", version="4.1.0", lifespan=lifespan)
+app = FastAPI(title="gois.v1 Professional Workspace & API", version="4.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -474,7 +474,7 @@ async def home_ui():
         .message.bot { background-color: var(--bot-bubble); border: 1px solid var(--border); color: var(--fg); align-self: flex-start; border-bottom-left-radius: 4px; width: 100%; }
         .sender-label { font-size: 0.75rem; color: var(--muted); margin-bottom: 2px; font-weight: 600; }
 
-        /* Estilização Profissional de Blocos de Código com Botão Copiar */
+        /* Blocos de Código e Botão Copiar */
         .code-block-container {
             background: var(--code-bg);
             border: 1px solid var(--border);
@@ -503,9 +503,9 @@ async def home_ui():
             font-weight: 600;
         }
         .copy-btn:hover { background: var(--accent-hover); }
-        pre { margin: 0; padding: 12px; overflow-x: auto; font-family: Consolas, Monaco, monospace; font-size: 0.85rem; color: #58a6ff; }
+        pre { margin: 0; padding: 12px; overflow-x: auto; font-family: Consolas, Monaco, monospace; font-size: 0.85rem; color: #58a6ff; white-space: pre-wrap; }
 
-        /* Área de Input com Drop de Ficheiros */
+        /* Painel de Input com Drop Funcional de Ficheiros */
         #input-panel {
             position: absolute; bottom: 0; left: 0; width: 100%;
             background: linear-gradient(transparent, var(--bg-main) 30%);
@@ -520,18 +520,15 @@ async def home_ui():
         textarea { flex: 1; background: transparent; color: var(--fg); border: none; resize: none; height: 24px; max-height: 120px; outline: none; font-family: inherit; font-size: 0.95rem; }
         
         .file-drop-area {
-            display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+            display: flex; align-items: center; gap: 6px; padding: 4px 8px;
             background: var(--bg-panel); border-radius: 6px; font-size: 0.8rem; color: var(--muted);
             border: 1px dashed var(--border); cursor: pointer;
         }
         .file-drop-area:hover { border-color: var(--accent); color: var(--fg); }
-        .file-pill { background: var(--user-bubble); color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 4px; }
+        .file-pill { background: var(--user-bubble); color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 6px; }
         
         .send-btn { background-color: var(--accent); color: white; border: none; border-radius: 8px; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
         .send-btn svg { width: 16px; height: 16px; fill: currentColor; }
-        
-        /* Drag and Drop visual feedback */
-        body.dragover { border: 2px dashed var(--accent); }
     </style>
 </head>
 <body>
@@ -559,7 +556,7 @@ async def home_ui():
             <div class="input-box-wrapper" id="dropZone">
                 <div id="attachedFilesContainer" style="display: flex; gap: 6px; flex-wrap: wrap;"></div>
                 <div class="input-row">
-                    <label class="file-drop-area" title="Carregar Ficheiro">
+                    <label class="file-drop-area" title="Importar Ficheiro">
                         📁 <span>Importar</span>
                         <input type="file" id="fileInput" style="display: none;" multiple onchange="handleFileSelect(event)">
                     </label>
@@ -588,36 +585,52 @@ async def home_ui():
         }
 
         function initApp() {
-            if (chats.length === 0) createNewChat();
-            else {
-                if (!currentChatId || !chats.find(c => c.id === currentChatId)) currentChatId = chats[0].id;
-                renderHistory(); loadCurrentChat();
+            if (chats.length === 0) {
+                createNewChat();
+            } else {
+                if (!currentChatId || !chats.find(c => c.id === currentChatId)) {
+                    currentChatId = chats[0].id;
+                }
+                renderHistory();
+                loadCurrentChat();
             }
             setupDragAndDrop();
         }
 
         function createNewChat() {
             const newChat = { id: 'chat_' + Date.now(), title: 'Nova Conversa', messages: [] };
-            chats.unshift(newChat); currentChatId = newChat.id;
-            saveState(); renderHistory(); loadCurrentChat();
+            chats.unshift(newChat);
+            currentChatId = newChat.id;
+            saveState();
+            renderHistory();
+            loadCurrentChat();
             if(window.innerWidth <= 768) toggleSidebar();
         }
 
         function deleteChat(id, event) {
             event.stopPropagation();
             chats = chats.filter(c => c.id !== id);
-            if (chats.length === 0) createNewChat();
-            else if (currentChatId === id) { currentChatId = chats[0].id; loadCurrentChat(); }
-            saveState(); renderHistory();
+            if (chats.length === 0) {
+                createNewChat();
+            } else if (currentChatId === id) {
+                currentChatId = chats[0].id;
+                loadCurrentChat();
+            }
+            saveState();
+            renderHistory();
         }
 
         function switchChat(id) {
-            currentChatId = id; saveState(); renderHistory(); loadCurrentChat();
+            currentChatId = id;
+            saveState();
+            renderHistory();
+            loadCurrentChat();
             if(window.innerWidth <= 768) toggleSidebar();
         }
 
         function renderHistory() {
-            const listEl = document.getElementById('historyList'); listEl.innerHTML = '';
+            const listEl = document.getElementById('historyList');
+            listEl.innerHTML = '';
             chats.forEach(chat => {
                 const item = document.createElement('div');
                 item.className = `history-item ${chat.id === currentChatId ? 'active' : ''}`;
@@ -635,14 +648,13 @@ async def home_ui():
             if (!chat) return;
             titleEl.textContent = chat.title;
             if (chat.messages.length === 0) {
-                appendMessageUI('gois.v1', 'Olá! O Command Center está pronto. Como vamos avançar passo a passo?', 'bot');
+                appendMessageUI('gois.v1', 'Olá! Command Center ativo. Como vamos avançar passo a passo?', 'bot');
             } else {
                 chat.messages.forEach(m => appendMessageUI(m.role === 'user' ? 'Tu' : 'gois.v1', m.content, m.role === 'user' ? 'user' : 'bot'));
             }
             scrollToBottom();
         }
 
-        // Sistema de formatação de mensagens com Blocos de Código e Botão Copiar
         function formatMessageContent(text) {
             const container = document.createElement('div');
             const parts = text.split(/(```[\s\S]*?```)/g);
@@ -710,10 +722,11 @@ async def home_ui():
             return msg;
         }
 
-        // Gestão de Ficheiros (Drop e Importação)
+        // Gestão e Drop de Ficheiros Corrigido
         function handleFileSelect(event) {
             const files = event.target.files;
             processFiles(files);
+            event.target.value = ''; // Reset input
         }
 
         function setupDragAndDrop() {
@@ -725,6 +738,7 @@ async def home_ui():
                 dropZone.addEventListener(eventName, (e) => { e.preventDefault(); dropZone.style.borderColor = 'var(--border)'; }, false);
             });
             dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
                 const files = e.dataTransfer.files;
                 processFiles(files);
             }, false);
@@ -748,7 +762,7 @@ async def home_ui():
             attachedFiles.forEach((file, index) => {
                 const pill = document.createElement('div');
                 pill.className = 'file-pill';
-                pill.innerHTML = `📄 ${file.name} <span style="cursor:pointer;" onclick="removeFile(${index})">✕</span>`;
+                pill.innerHTML = `📄 ${file.name} <span style="cursor:pointer; font-weight:bold;" onclick="removeFile(${index})">✕</span>`;
                 container.appendChild(pill);
             });
         }
@@ -763,7 +777,6 @@ async def home_ui():
             let text = textarea.value.trim();
             if (!text && attachedFiles.length === 0) return;
 
-            // Anexar conteúdo dos ficheiros à mensagem se existirem
             if (attachedFiles.length > 0) {
                 let fileDump = "\\n\\n[Ficheiros Anexados:\\n";
                 attachedFiles.forEach(f => {
@@ -775,12 +788,18 @@ async def home_ui():
                 renderAttachedFiles();
             }
 
-            textarea.value = ''; textarea.style.height = '24px';
+            textarea.value = ''; 
+            textarea.style.height = '24px';
+            
             const chat = chats.find(c => c.id === currentChatId);
-            if (chat.messages.length === 0) { chat.title = text.substring(0, 24); renderHistory(); }
+            if (chat.messages.length === 0) { 
+                chat.title = text.substring(0, 24); 
+                renderHistory(); 
+            }
             
             chat.messages.push({ role: 'user', content: text });
-            appendMessageUI('Tu', text, 'user'); saveState();
+            appendMessageUI('Tu', text, 'user'); 
+            saveState();
             
             const botMsgEl = appendMessageUI('gois.v1', 'A analisar passo a passo...', 'bot');
             let fullReply = "";
@@ -789,13 +808,13 @@ async def home_ui():
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ messages: chat.messages, stream: true })
                 });
-                const reader = response.body.getReader(); const decoder = new TextDecoder();
-                botMsgEl.innerHTML = ''; // Limpar indicador de carregamento
-                const contentDiv = document.createElement('div');
-                botMsgEl.appendChild(contentDiv);
+                const reader = response.body.getReader(); 
+                const decoder = new TextDecoder();
+                botMsgEl.innerHTML = '';
 
                 while (true) {
-                    const { done, value } = await reader.read(); if (done) break;
+                    const { done, value } = await reader.read(); 
+                    if (done) break;
                     const chunk = decoder.decode(value, { stream: true });
                     for (const line of chunk.split('\\n')) {
                         if (line.startsWith('data:')) {
@@ -814,8 +833,12 @@ async def home_ui():
                         }
                     }
                 }
-                chat.messages.push({ role: 'assistant', content: fullReply }); saveState();
-            } catch (err) { botMsgEl.textContent = "Erro: " + err.message; }
+                chat.messages.push({ role: 'assistant', content: fullReply }); 
+                saveState();
+                renderHistory();
+            } catch (err) { 
+                botMsgEl.textContent = "Erro: " + err.message; 
+            }
         }
 
         function scrollToBottom() { const c = document.getElementById('chat-container'); c.scrollTop = c.scrollHeight; }
