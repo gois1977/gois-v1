@@ -2,7 +2,7 @@
 
 Variáveis de ambiente (Render > Environment):
   ADMIN_TOKEN = "rnd_BzxO8mgYntvwKCv0I3ruBaROaPGJ"
-  GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY   (pelo menos uma)
+  GROQ_API_KEY , GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY = "mstrl_DOpXZ4J0DCQ7Yz529abt08bMEewboLGj_3FzGnx"
   DATA_DIR           (opcional) pasta onde guardar gois_db.json
 """
 import os
