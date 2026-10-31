@@ -92,6 +92,24 @@ table.t tbody tr{cursor:pointer}
 .muted{color:var(--muted);font-size:.78rem}
 .ok{color:#3fb950}.bad{color:#f85149}.warnc{color:#d29922}
 #admMsg{min-height:1.2em;font-size:.82rem}
+.lamp{display:none;align-items:center;gap:7px;font-size:.78rem;font-weight:600;color:var(--fg);min-width:0}
+body.admin .lamp{display:inline-flex}
+.lamp .lt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lamp .pre{display:none}
+@media(min-width:520px){.lamp .pre{display:inline}}
+.dot{position:relative;width:10px;height:10px;border-radius:50%;background:var(--c,#8b949e);flex-shrink:0}
+.dot.pulse::after{content:"";position:absolute;inset:-2px;border-radius:50%;border:2px solid var(--c);animation:ring 1.5s ease-out infinite}
+.dot.slow{animation:breathe 2.2s ease-in-out infinite}
+.spinr{width:16px;height:16px;border-radius:50%;border:3px solid rgba(139,148,158,.28);border-top-color:var(--c);animation:rot .8s linear infinite;flex-shrink:0}
+.badge{position:relative;width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:.82rem;background:rgba(139,148,158,.2);color:var(--muted);flex-shrink:0}
+.badge.on{background:var(--user);color:#fff}
+.badge.on::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--user);animation:ring 1.4s ease-out infinite}
+.lrow{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.lrow h3{margin:0}
+@keyframes ring{from{transform:scale(1);opacity:.9}to{transform:scale(1.9);opacity:0}}
+@keyframes breathe{0%,100%{opacity:.3}50%{opacity:1}}
+@keyframes rot{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.dot,.dot::after,.spinr,.badge::after{animation:none!important}}
 </style>
 </head>
 <body>
@@ -109,6 +127,7 @@ table.t tbody tr{cursor:pointer}
     <button id="menu" onclick="toggleSide()">☰</button>
     <span id="brand" onclick="brandClick()">🟢 gois.v1</span>
     <button id="admBtn" class="sm" onclick="openAdmin()">📊 Painel</button>
+    <span class="lamp" id="modelLamp" title="Estado do modelo"><i class="dot"></i><span><span class="pre"></span><span class="lt"></span></span></span>
     <span id="title" style="margin-left:auto;color:var(--muted);font-size:.8rem;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%"></span>
   </div>
   <div id="chat"></div>
@@ -413,6 +432,7 @@ function admRender(){
 
   // estado
   const st = ce('div', 'sec');
+  const sh = ce('div', 'lrow'); sh.append(ce('h3', '', '🏫 Sala de Aula'), mkLamp('studyLamp')); st.append(sh);
   const provs = (d.providers_with_key || []).join(', ') || 'NENHUM (configura chaves no Render)';
   st.append(ce('div', '', 'Fornecedores com chave: ' + provs));
   st.append(ce('div', 'muted', 'Professor atual: ' + (d.current_teacher || '—') + ' · Lições: ' + (comp.lessons_total || 0)));
@@ -463,7 +483,9 @@ function admRender(){
   body.append(ts);
 
   // categorias
-  const cs = ce('div', 'sec'); cs.append(ce('h3', '', '📊 Comparação por categoria (toca para escolher)'));
+  const cs = ce('div', 'sec');
+  const ch = ce('div', 'lrow'); ch.append(ce('h3', '', '📊 Comparação por categoria'), mkBench()); cs.append(ch);
+  cs.append(ce('div', 'muted', 'Toca numa linha para escolher a categoria.'));
   const tw = ce('div', 'tw'), tb = ce('table', 't');
   const head = ce('tr'); ['Categoria', 'gois.v1', 'Gemini', 'DeepSeek', 'Lições', 'Bench.'].forEach(h => head.append(ce('th', '', h)));
   const th = ce('thead'); th.append(head); tb.append(th);
@@ -485,6 +507,7 @@ function admRender(){
 
   const msg = ce('div', 'muted'); msg.id = 'admMsg'; body.append(msg);
   admRenderLocal();
+  updateLamps();
 }
 function admRenderLocal(){
   const e = $('admLocal'); if(!e || !admLocal) return;
@@ -501,27 +524,95 @@ async function admAct(tag, work, pick){
 async function admRunLearn(){
   if(admBusy){ admMsg('⏳ Já há uma operação em curso…', 'warnc'); return; }
   const cat = admSel; admBusy = true; admMsg('📚 A estudar «' + cat + '»…', 'muted');
+  localJob = {kind: 'learn', category: cat}; updateLamps();
   try{
     const r = await admApi('/api/classroom/learn', 'POST', {category: cat});
     admData = r.settings; admRender(); admMsg('✅ Nova lição: ' + ((r.lesson && r.lesson.title) || cat), 'ok');
   }catch(e){ admMsg('❌ ' + e.message, 'bad'); }
-  admBusy = false;
+  admBusy = false; localJob = null; updateLamps(); pollJob();
 }
 async function admRunBench(){
   if(admBusy){ admMsg('⏳ Já há uma operação em curso…', 'warnc'); return; }
   const cat = admSel; admBusy = true; admMsg('⚔️ Benchmark em «' + cat + '» (30–90 s)…', 'muted');
+  localJob = {kind: 'benchmark', category: cat}; updateLamps();
   try{
     const r = await admApi('/api/comparison/benchmark', 'POST', {category: cat});
     const b = r.benchmark || {};
     admData = r.settings; admRender();
     admMsg('✅ gois.v1 ' + fmtP(b.gois_score) + ' · Gemini ' + fmtP(b.gemini_ref) + ' · DeepSeek ' + fmtP(b.deepseek_ref), 'ok');
   }catch(e){ admMsg('❌ ' + e.message, 'bad'); }
-  admBusy = false;
+  admBusy = false; localJob = null; updateLamps(); pollJob();
 }
 document.addEventListener('keydown', e => { if(e.key === 'Escape') closeAdmin(); });
 
+// ----- indicadores animados (modo admin) -----
+let modelState = 'checking', jobState = {}, learningNow = false, localJob = null, _pm = false, _pj = false;
+function mkLamp(id){
+  const w = ce('span', 'lamp'); w.id = id; w.append(ce('i', 'dot'), ce('span', 'lt')); return w;
+}
+function mkBench(){
+  const w = ce('span', 'lamp'); w.id = 'benchLamp'; w.append(ce('span', 'badge', '0'), ce('span', 'lt', 'Nenhum benchmark a correr')); return w;
+}
+function setLamp(id, mode, color, text, pre){
+  const el = $(id); if(!el) return;
+  const ind = el.firstElementChild;
+  ind.className = mode === 'spin' ? 'spinr' : 'dot' + (mode === 'pulse' ? ' pulse' : mode === 'slow' ? ' slow' : '');
+  ind.style.setProperty('--c', color);
+  const p = el.querySelector('.pre'); if(p) p.textContent = pre || '';
+  el.querySelector('.lt').textContent = text;
+}
+function updateLamps(){
+  const G = '#3fb950', W = '#d29922', R = '#f85149', M = '#8b949e';
+  const m = modelState;
+  const ml = $('modelLamp');
+  if(ml){
+    const S = {online: ['pulse', G, 'online', 'Modelo '], checking: ['pulse', W, 'a verificar…', 'Modelo '],
+               offline: ['off', R, 'offline', 'Modelo '], nolink: ['off', W, 'não ligado', 'Modelo '],
+               noserver: ['off', R, 'servidor sem resposta', '']}[m] || ['off', M, 'sem sessão admin', ''];
+    setLamp('modelLamp', S[0], S[1], S[2], S[3]);
+    ml.title = m === 'online' ? 'Modelo online e funcional' : 'Modelo: ' + S[2];
+  }
+  const job = localJob || jobState || {};
+  const auto = (admData && admData.learning_now != null) ? !!admData.learning_now : learningNow;
+  if($('studyLamp')){
+    if(job.kind === 'learn') setLamp('studyLamp', 'spin', G, 'A estudar · ' + (job.category || ''));
+    else if(auto) setLamp('studyLamp', 'slow', W, 'Autónomo ON · à espera da próxima lição');
+    else setLamp('studyLamp', 'off', M, 'Em repouso · não está a estudar');
+  }
+  const bl = $('benchLamp');
+  if(bl){
+    const on = job.kind === 'benchmark';
+    const b = bl.querySelector('.badge'); b.textContent = on ? '1' : '0'; b.className = 'badge' + (on ? ' on' : '');
+    bl.querySelector('.lt').textContent = on ? 'A executar benchmark · ' + (job.category || '') : 'Nenhum benchmark a correr';
+  }
+}
+async function pollModel(){
+  if(!isAdmin || document.hidden || _pm) return; _pm = true;
+  try{
+    const r = await fetch(API + '/api/local/status', {headers: hdrs()});
+    if(!r.ok) throw new Error('http');
+    const j = await r.json();
+    modelState = j.online ? 'online' : (j.url_set ? 'offline' : 'nolink');
+  }catch(e){ modelState = 'noserver'; }
+  _pm = false; updateLamps();
+}
+async function pollJob(){
+  if(!isAdmin || document.hidden || _pj) return; _pj = true;
+  try{
+    const r = await fetch(API + '/api/job', {headers: hdrs()});
+    if(r.ok){ const j = await r.json(); jobState = j.job || {}; learningNow = !!j.learning_now; }
+  }catch(e){}
+  _pj = false; updateLamps();
+}
+function startLamps(){
+  if(!isAdmin) return;
+  updateLamps(); pollModel(); pollJob();
+  setInterval(pollJob, 8000); setInterval(pollModel, 20000);
+  document.addEventListener('visibilitychange', () => { if(!document.hidden){ pollJob(); pollModel(); } });
+}
+
 (async function(){
-  await initAdmin(); load();
+  await initAdmin(); load(); startLamps();
   if(!chats.length) newChat(); else { if(!chat()) cur = chats[0].id; renderHistory(); renderChat(); }
 })();
 </script>
