@@ -27,6 +27,7 @@ import time
 import uuid
 import hmac
 import random
+import string
 import asyncio
 import logging
 from collections import Counter, defaultdict, deque
@@ -41,7 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger("uvicorn.error")
 
-VERSION = "6.2.0"
+VERSION = "6.3.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE_DIR / "data"))
 DB_FILE = DATA_DIR / "gois_db.json"
@@ -88,6 +89,12 @@ def today() -> str:
 DEFAULT_CAPACITY = {"Groq": 300_000, "Gemini": 0, "OpenRouter": 0, "Mistral": 0}
 
 
+DEFAULT_TRACKED = {
+    "Mistral": ["mistral-small-latest", "mistral-medium-latest", "mistral-large-latest"],
+    "Groq": ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant", "openai/gpt-oss-20b"],
+}
+
+
 def default_settings() -> dict:
     return {
         "classroom_mode": True,
@@ -104,6 +111,7 @@ def default_settings() -> dict:
             "auto_paused_by_limit": False, "limit_reached": False,
         },
         "comparison": {"categories": {}},
+        "tracked_models": {k: list(v) for k, v in DEFAULT_TRACKED.items()},
     }
 
 
@@ -175,6 +183,11 @@ def tokens_state() -> dict:
 
 def add_tokens(n: int, provider=None) -> None:
     t = tokens_state()
+    if provider == LOCAL_PROVIDER["name"]:
+        # O modelo próprio corre no teu PC (LM Studio): não gasta tokens de nenhuma API, por isso NÃO entra no
+        # contador diário, no limite nem no total. Fica só num contador à parte, informativo.
+        t["local_total"] = int(t.get("local_total") or 0) + int(n or 0)
+        return
     t["used_today"] += int(n or 0)
     t["used_total"] += int(n or 0)
     if provider:
@@ -584,24 +597,56 @@ async def stream_llm_request(payload: dict, is_admin: bool = False):
 # Modelos contra os quais o gois.v1 é comparado (a partir da 6.2): Mistral e Groq.
 # gemini_ref / deepseek_ref (até à 6.1) continuam guardados na base de dados e nas cópias de segurança
 # (nada se apaga), mas já não são medidos nem mostrados.
-SCORE_FIELDS = ("gois_score", "mistral_ref", "groq_ref")
+SCORE_FIELDS = ("gois_score", "mistral_ref", "groq_ref")      # mistral_ref / groq_ref: notas antigas (6.2), já não atualizadas
 LEGACY_FIELDS = ("gemini_ref", "deepseek_ref")
-MODEL_KEYS = {"gois_score": "gois", "mistral_ref": "mistral", "groq_ref": "groq"}
-# Por modelo guardamos de onde vem cada nota: última nota crua, nº de medições, quando e QUE modelo respondeu de verdade.
-META_FIELDS = tuple(f"{k}_{m}" for k in MODEL_KEYS.values() for m in ("last", "n", "at", "model"))
-BENCH_MAX_TOKENS = 400       # igual para gois.v1, Mistral e Groq (antes: 250/450)
+# A partir da 6.3 cada fornecedor tem VÁRIOS modelos medidos em paralelo (e["models"]["Fornecedor|modelo"]); o painel escolhe
+# 1 de cada fornecedor para mostrar, mas todos os modelos seguidos continuam a ser medidos (evolução real por detrás).
+CONTESTANTS = ("Mistral", "Groq")
+BENCH_MAX_TOKENS = 400       # igual para o gois.v1 e para todos os modelos de referência
 BENCH_TEMPERATURE = 0.4
-CONTESTANTS = ("Mistral", "Groq")   # fornecedores que respondem no benchmark; o juiz prefere os outros
+MAX_TRACKED_PER_PROVIDER = 6
+NON_CHAT_HINTS = ("whisper", "embed", "guard", "moderation", "tts", "playai", "ocr", "transcri", "orpheus", "safeguard", "voxtral")
+MODEL_LIST_CACHE: dict = {}
+HISTORY_MAX = 600
+
+
+def mkey(provider: str, model: str) -> str:
+    return f"{provider}|{model}"
+
+
+def tracked_models() -> dict:
+    tr = DB_SETTINGS.get("tracked_models")
+    if not isinstance(tr, dict):
+        tr = DB_SETTINGS["tracked_models"] = {}
+    for prov in CONTESTANTS:
+        lst = tr.get(prov)
+        if not isinstance(lst, list) or not lst:
+            tr[prov] = list(DEFAULT_TRACKED[prov])
+    return tr
 
 
 def comp_entry(cat: str) -> dict:
     cats = DB_SETTINGS["comparison"].setdefault("categories", {})
     e = cats.setdefault(cat, {})
-    # setdefault: as categorias já guardadas (com gemini_ref / deepseek_ref) ganham os campos novos sem perder nada.
+    # setdefault: as categorias já guardadas ganham os campos novos sem perder nada.
     for k, v in (("gois_score", None), ("mistral_ref", None), ("groq_ref", None),
-                 ("benchmarks", 0), ("last_benchmark", None), ("lessons", 0)):
+                 ("benchmarks", 0), ("last_benchmark", None), ("lessons", 0), ("models", {})):
         e.setdefault(k, v)
     return e
+
+
+def models_summary(ents) -> dict:
+    """{'Fornecedor|modelo': {avg, n, cats, at}} sobre as categorias em que cada modelo foi realmente medido."""
+    acc: dict = {}
+    for e in ents:
+        for k, m in (e.get("models") or {}).items():
+            if isinstance(m, dict) and isinstance(m.get("score"), (int, float)):
+                a = acc.setdefault(k, {"sum": 0.0, "cats": 0, "n": 0, "at": ""})
+                a["sum"] += m["score"]
+                a["cats"] += 1
+                a["n"] += int(m.get("n") or 0)
+                a["at"] = max(a["at"], str(m.get("at") or ""))
+    return {k: {"avg": round(v["sum"] / v["cats"], 1), "cats": v["cats"], "n": v["n"], "at": v["at"]} for k, v in acc.items()}
 
 
 def recompute_comparison() -> dict:
@@ -612,23 +657,35 @@ def recompute_comparison() -> dict:
     ents = list(comp["categories"].values())
     gs = [e["gois_score"] for e in ents if e.get("gois_score") is not None]
     comp["overall"] = round(sum(gs) / len(gs), 1) if gs else 0.0
+    summary = models_summary(ents)
+    comp["models_summary"] = summary
 
     def parity(ref: str) -> float:
         pairs = [(e["gois_score"], e[ref]) for e in ents if e.get("gois_score") is not None and e.get(ref)]
         return round(sum(a for a, _ in pairs) / sum(b for _, b in pairs) * 100, 1) if pairs else 0.0
 
-    # Paridade atual (Mistral, Groq) + a antiga (Gemini, DeepSeek), só para não perder o histórico.
     for ref in SCORE_FIELDS[1:] + LEGACY_FIELDS:
         comp["parity_vs_" + ref[:-4]] = parity(ref)
-
-    # Comparação justa: médias só nas categorias em que TODOS os modelos têm nota (mesmas perguntas, mesma base).
-    common = [e for e in ents if all(e.get(f) is not None for f in SCORE_FIELDS)]
-    comp["common_categories"] = len(common)
-    comp["like_for_like"] = {MODEL_KEYS[f]: (round(sum(e[f] for e in common) / len(common), 1) if common else None)
-                             for f in SCORE_FIELDS}
-    comp["measured"] = {MODEL_KEYS[f]: sum(1 for e in ents if e.get(f) is not None) for f in SCORE_FIELDS}
+    # Paridade por modelo (gois.v1 ÷ modelo) só nas categorias em que ambos têm nota real.
+    par = {}
+    for k in summary:
+        pairs = [(e["gois_score"], e["models"][k]["score"]) for e in ents
+                 if e.get("gois_score") is not None and isinstance((e.get("models") or {}).get(k), dict) and e["models"][k].get("score")]
+        if pairs:
+            par[k] = round(sum(a for a, _ in pairs) / sum(b for _, b in pairs) * 100, 1)
+    comp["parity_by_model"] = par
     comp["lessons_total"] = len(DB_KNOWLEDGE)
     return comp
+
+
+def record_history() -> None:
+    """Ponto de evolução (servidor): média de cada modelo, para a evolução real continuar mesmo com a app fechada."""
+    comp = DB_SETTINGS.setdefault("comparison", {"categories": {}})
+    snap = {"t": int(time.time()), "gois": comp.get("overall") or None,
+            "models": {k: v["avg"] for k, v in (comp.get("models_summary") or {}).items()}}
+    hist = comp.setdefault("history", [])
+    hist.append(snap)
+    del hist[:-HISTORY_MAX]
 
 
 def parse_lesson(text: str, cat: str):
@@ -699,7 +756,7 @@ async def learn_category(cat: str, provider: str = "auto") -> dict:
 
 def parse_scores(text: str) -> dict:
     out = {}
-    for letter, num in re.findall(r"\b([A-C])\s*[=:]\s*(\d{1,3})", text or ""):
+    for letter, num in re.findall(r"\b([A-Z])\s*[=:]\s*(\d{1,3})", text or ""):
         out[letter] = max(0, min(100, int(num)))
     return out
 
@@ -724,28 +781,29 @@ async def make_bench_question(cat: str) -> str:
 
 
 async def judge_scores(question: str, entries: list):
-    """Pede notas ao juiz; repete com outros fornecedores se a resposta não trouxer uma nota por modelo."""
-    letters = "ABC"
-    block = "\n\n".join(f"Resposta {letters[i]}:\n{txt}" for i, (_, txt) in enumerate(entries))
+    """Pede notas ao juiz (uma por resposta anónima); repete com outros fornecedores se faltar alguma nota."""
+    letters = string.ascii_uppercase[:len(entries)]
+    block = "\n\n".join(f"Resposta {letters[i]}:\n{txt[:1800]}" for i, (_, txt) in enumerate(entries))
     msgs = [{"role": "system", "content": "És um avaliador imparcial."},
             {"role": "user", "content": f"Pergunta: {question}\n\n{block}\n\nDá a cada resposta nota de 0 a 100. Formato: "
                                         + ";".join(f"{letters[i]}=<nota>" for i in range(len(entries)))
                                         + ". Responde apenas nesse formato."}]
     errs = []
-    # Mistral e Groq são avaliados; por isso o juiz prefere Gemini / OpenRouter e só usa estes dois como último recurso.
+    # Os fornecedores avaliados (Mistral/Groq) só julgam em último recurso.
     for p in sorted(get_providers("public"), key=lambda x: x["name"] in CONTESTANTS):
         if not candidate_keys(p):
             continue
-        jdata, jprov, jmodel, jerr = await try_providers(msgs, temperature=0.0, only=p["name"], timeout=45.0, max_tokens=120)
+        jdata, jprov, jmodel, jerr = await try_providers(msgs, temperature=0.0, only=p["name"], timeout=60.0,
+                                                         max_tokens=12 * len(entries) + 40)
         errs += jerr
         if jdata is None:
             continue
         add_tokens(usage_tokens(jdata), jprov)
         sc = parse_scores(reply_text(jdata))
         if all(letters[i] in sc for i in range(len(entries))):
-            return {name: sc[letters[i]] for i, (name, _) in enumerate(entries)}, errs
+            return {name: sc[letters[i]] for i, (name, _) in enumerate(entries)}, errs, f"{jprov}/{jmodel}"
         errs.append(f"{jprov}: notas incompletas")
-    return None, errs
+    return None, errs, None
 
 
 async def probe_provider(name: str, models=None) -> dict:
@@ -783,10 +841,11 @@ async def probe_provider(name: str, models=None) -> dict:
 
 
 async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> dict:
+    """Mede o gois.v1 e TODOS os modelos seguidos (vários por fornecedor) na mesma pergunta, com as mesmas condições,
+    avaliados às cegas pelo mesmo juiz. O painel mostra só os escolhidos, mas todos evoluem."""
     async with job_slot("benchmark", cat):
         t0 = time.time()
         if not gois_answer:
-            # Modo antigo (resposta pedida pelo servidor através do túnel; pode dar HTTP 524 em PCs lentos).
             alive, why = await local_alive()
             if not alive:
                 raise RuntimeError("O servidor não consegue falar com o teu modelo: " + why + ".")
@@ -795,68 +854,72 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
 
         recent = [k for k in DB_KNOWLEDGE if k.get("category") == cat][-2:]
         extra = "\n".join(f"- {k.get('title', '')}: {str(k.get('content', ''))[:350]}" for k in recent)
-        plain = [{"role": "user", "content": question}]
-        gois_msgs = prepare_messages(plain, is_admin=True, extra_context=extra)
+        gois_msgs = prepare_messages([{"role": "user", "content": question}], is_admin=True, extra_context=extra)
         ref_msgs = [{"role": "system", "content": "Responde de forma rigorosa e concisa."}, {"role": "user", "content": question}]
 
-        async def ask(msgs, **kw):
-            tmo = 150.0 if kw.get("scope") == "admin" else 45.0
-            # Mesmas condições para os três modelos: mesma temperatura e mesmo limite de resposta (BENCH_MAX_TOKENS).
-            d, prov, model, _ = await try_providers(msgs, temperature=BENCH_TEMPERATURE, timeout=tmo, max_tokens=BENCH_MAX_TOKENS, **kw)
-            return (reply_text(d), usage_tokens(d, reply_text(d)), prov, model, []) if d else ("", 0, None, None, _)
+        targets = []
+        for prov in CONTESTANTS:
+            pdef = next((x for x in PROVIDERS if x["name"] == prov), None)
+            if pdef and candidate_keys(pdef):
+                targets += [(prov, m) for m in tracked_models()[prov]]
+        if not targets:
+            raise RuntimeError("Nenhum fornecedor de referência tem chave (MISTRAL_API_KEY / GROQ_API_KEY no Render).")
 
-        async def given_answer():
-            return gois_answer, max(1, len(gois_answer) // 4), "gois-local", "gois-v1 (LM Studio)", []
+        sem = asyncio.Semaphore(3)      # não rebentar os limites por minuto dos fornecedores gratuitos
 
-        (g_txt, g_tok, g_prov, g_model, g_err), (mis_txt, mis_tok, mis_prov, mis_model, _e1), (grq_txt, grq_tok, grq_prov, grq_model, _e2) = await asyncio.gather(
-            (given_answer() if gois_answer else ask(gois_msgs, scope="admin")),
-            ask(ref_msgs, only="Mistral"),
-            ask(ref_msgs, only="Groq"),
-        )
+        async def ask_ref(prov, model):
+            async with sem:
+                d, used_prov, used_model, errs = await try_providers(
+                    ref_msgs, temperature=BENCH_TEMPERATURE, only=prov, models=[model], timeout=45.0, max_tokens=BENCH_MAX_TOKENS)
+            txt = reply_text(d) if d else ""
+            return mkey(prov, model), txt, (usage_tokens(d, txt) if d else 0), used_prov, errs
+
+        async def ask_gois():
+            if gois_answer:
+                return gois_answer, max(1, len(gois_answer) // 4), "gois-local", []
+            d, prov, _m, errs = await try_providers(gois_msgs, temperature=BENCH_TEMPERATURE, timeout=150.0,
+                                                    max_tokens=BENCH_MAX_TOKENS, scope="admin")
+            return (reply_text(d), usage_tokens(d, reply_text(d)), prov, []) if d else ("", 0, None, errs)
+
+        (g_txt, g_tok, g_prov, g_err), *refs = await asyncio.gather(ask_gois(), *[ask_ref(p, m) for p, m in targets])
         add_tokens(g_tok, g_prov)
-        add_tokens(mis_tok, mis_prov)
-        add_tokens(grq_tok, grq_prov)
+        for _k, _t, tok, prv, _e in refs:
+            add_tokens(tok, prv)
         if not g_txt:
             raise RuntimeError("O teu modelo não respondeu (" + ("; ".join(g_err[-2:]) or "sem detalhe") + "). "
                                "Confirma que está ligado (▶ Ligar modelo próprio) e com contexto de 4096.")
 
-        entries = [("gois", g_txt)] + [x for x in (("mistral", mis_txt), ("groq", grq_txt)) if x[1]]
-        if len(entries) < 2:
-            raise RuntimeError("Nenhum modelo de referência (Mistral/Groq) respondeu, por isso não há com quem comparar. "
+        answered = [(k, t) for k, t, _tok, _p, _e in refs if t]
+        missing = [k for k, t, _tok, _p, _e in refs if not t]
+        if not answered:
+            raise RuntimeError("Nenhum modelo de referência respondeu, por isso não há com quem comparar. "
                                "Confirma as chaves MISTRAL_API_KEY / GROQ_API_KEY no Render e tenta de novo.")
+        entries = [("gois", g_txt)] + answered
         random.shuffle(entries)
-        letters = "ABC"
-        by_name, jerr = await judge_scores(question, entries)
+        by_name, jerr, judge = await judge_scores(question, entries)
         if by_name is None:
             raise RuntimeError("O juiz não devolveu notas válidas (" + ("; ".join(jerr[-3:]) or "sem detalhe") + "). Tenta de novo.")
 
         e = comp_entry(cat)
+        stamp = now_iso()
 
         def ema(prev, new):
-            return prev if new is None else (new if prev is None else round(prev * 0.5 + new * 0.5, 1))
+            return new if prev is None else round(prev * 0.5 + new * 0.5, 1)
 
-        stamp = now_iso()
-        models_used = {"gois": g_model, "mistral": mis_model, "groq": grq_model}
-        measured, missing = [], []
-        for field, key in MODEL_KEYS.items():
-            new_score = by_name.get(key)
-            if new_score is None:
-                missing.append(key)          # esse modelo não respondeu: a nota antiga NÃO é rejuvenescida
-                continue
-            e[field] = ema(e.get(field), new_score)
-            e[f"{key}_last"] = new_score
-            e[f"{key}_n"] = int(e.get(f"{key}_n") or 0) + 1
-            e[f"{key}_at"] = stamp
-            e[f"{key}_model"] = models_used.get(key)
-            measured.append(key)
+        e["gois_score"] = ema(e.get("gois_score"), by_name["gois"])
+        for k, _t in answered:
+            m = e["models"].setdefault(k, {"score": None, "last": None, "n": 0, "at": None})
+            m["score"] = ema(m.get("score"), by_name[k])
+            m["last"] = by_name[k]
+            m["n"] = int(m.get("n") or 0) + 1
+            m["at"] = stamp
         e["benchmarks"] = e.get("benchmarks", 0) + 1
         e["last_benchmark"] = stamp
         recompute_comparison()
+        record_history()
         save_db()
         return {"category": cat, "question": question, "elapsed_s": round(time.time() - t0, 1),
-                "gois_score": by_name.get("gois"), "mistral_ref": by_name.get("mistral"),
-                "groq_ref": by_name.get("groq"), "judge": "gois.v1 system",
-                "measured": measured, "missing": missing, "models": models_used}
+                "scores": by_name, "missing": missing, "judge": judge, "gois_score": by_name["gois"]}
 
 
 async def classroom_loop() -> None:
@@ -925,6 +988,7 @@ async def admin_verify(request: Request):
 
 def settings_view() -> dict:
     tokens_state()
+    tracked_models()
     recompute_comparison()
     view = dict(DB_SETTINGS)
     view["providers_with_key"] = [p["name"] for p in get_providers("public") if candidate_keys(p)]
@@ -1059,10 +1123,23 @@ async def state_restore(request: Request):
             continue
         cur = comp_entry(cat)
         if as_int(e.get("benchmarks")) > as_int(cur.get("benchmarks")):
-            for k in SCORE_FIELDS + LEGACY_FIELDS + META_FIELDS + ("benchmarks", "last_benchmark"):
+            for k in SCORE_FIELDS + LEGACY_FIELDS + ("benchmarks", "last_benchmark"):
                 if k in e:          # uma cópia antiga (sem mistral/groq) não apaga o que o servidor já mediu
                     cur[k] = e[k]
             n_cats += 1
+        # modelos por fornecedor: por cada modelo fica a cópia com mais medições
+        for k, m in (e.get("models") or {}).items():
+            if isinstance(m, dict) and as_int(m.get("n")) > as_int(((cur.get("models") or {}).get(k) or {}).get("n")):
+                cur["models"][k] = {f: m.get(f) for f in ("score", "last", "n", "at")}
+    hist = (body.get("comparison") or {}).get("history")
+    cur_hist = DB_SETTINGS["comparison"].setdefault("history", [])
+    if isinstance(hist, list) and len(hist) > len(cur_hist):
+        cur_hist[:] = [h for h in hist if isinstance(h, dict)][-HISTORY_MAX:]
+    tr = body.get("tracked_models")
+    if isinstance(tr, dict):
+        for prov in CONTESTANTS:
+            if isinstance(tr.get(prov), list) and tracked_models()[prov] == DEFAULT_TRACKED[prov]:
+                tracked_models()[prov] = [str(x)[:100] for x in tr[prov]][:MAX_TRACKED_PER_PROVIDER]
 
     t = tokens_state()
     bt = body.get("tokens") or {}
@@ -1232,6 +1309,84 @@ async def comparison_benchmark(request: Request):
     except Exception as e:
         raise HTTPException(502, str(e))
     return {"benchmark": result, "settings": settings_view()}
+
+
+async def list_provider_models(name: str, force: bool = False) -> dict:
+    """Lista REAL de modelos de chat que o fornecedor tem (pedida à API dele, com cache de 10 min)."""
+    now = time.time()
+    c = MODEL_LIST_CACHE.get(name)
+    if c and not force and now - c["t"] < 600:
+        return c["data"]
+    p = next((x for x in PROVIDERS if x["name"] == name), None)
+    keys = candidate_keys(p) if p else []
+    ids, live, err = [], False, ""
+    if p and keys:
+        try:
+            url = p["url"].rsplit("/chat/completions", 1)[0] + "/models"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
+                r = await client.get(url, headers={"Authorization": f"Bearer {keys[0]}", **p["extra_headers"]})
+            if r.status_code == 200:
+                for m in (r.json().get("data") or []):
+                    mid = str(m.get("id") or "")
+                    caps = m.get("capabilities") if isinstance(m.get("capabilities"), dict) else {}
+                    if (not mid or any(h in mid.lower() for h in NON_CHAT_HINTS) or m.get("active") is False
+                            or caps.get("completion_chat") is False):
+                        continue
+                    ids.append(mid)
+                live = bool(ids)
+            else:
+                err = f"HTTP {r.status_code}"
+        except Exception as e:
+            err = type(e).__name__
+    elif p:
+        err = f"falta a variável {p['env']}"
+    data = {"models": sorted(set(ids)), "live": live, "error": err}
+    if live or not c:
+        MODEL_LIST_CACHE[name] = {"t": now, "data": data}
+        return data
+    return c["data"]
+
+
+@app.get("/api/provider-models")
+async def provider_models(request: Request):
+    """Modelos de cada fornecedor (lista real) + dados reais já medidos de cada um (mesmo os que não estão escolhidos)."""
+    await require_admin(request)
+    force = bool(request.query_params.get("refresh"))
+    summary = recompute_comparison().get("models_summary") or {}
+    out = {}
+    for prov in CONTESTANTS:
+        lst = await list_provider_models(prov, force)
+        tr = tracked_models()[prov]
+        ids = sorted(set(lst["models"]) | set(tr) | {k.split("|", 1)[1] for k in summary if k.startswith(prov + "|")})
+        out[prov] = {"live": lst["live"], "error": lst["error"], "tracked": tr, "max_tracked": MAX_TRACKED_PER_PROVIDER,
+                     "models": [{"id": m, "tracked": m in tr, **(summary.get(mkey(prov, m)) or {})} for m in ids]}
+    return out
+
+
+@app.post("/api/models/track")
+async def models_track(request: Request):
+    """Começa (ou pára) de medir um modelo de um fornecedor. Os dados já medidos nunca se apagam."""
+    await require_admin(request)
+    body = await request.json()
+    prov, model = str(body.get("provider") or ""), str(body.get("model") or "").strip()[:100]
+    if prov not in CONTESTANTS or not model:
+        raise HTTPException(400, "Fornecedor ou modelo inválido.")
+    lst = await list_provider_models(prov)
+    if lst["live"] and model not in lst["models"] and model not in tracked_models()[prov]:
+        raise HTTPException(400, f"O {prov} não tem o modelo '{model}'.")
+    tr = tracked_models()[prov]
+    if body.get("tracked", True):
+        if model not in tr:
+            if len(tr) >= MAX_TRACKED_PER_PROVIDER:
+                raise HTTPException(400, f"Já estás a medir {len(tr)} modelos do {prov} (máx. {MAX_TRACKED_PER_PROVIDER}, "
+                                         "para não gastar os limites): pára de medir um deles primeiro.")
+            tr.append(model)
+    elif len(tr) <= 1:
+        raise HTTPException(400, f"Tem de ficar pelo menos 1 modelo do {prov} em medição.")
+    elif model in tr:
+        tr.remove(model)
+    save_db()
+    return settings_view()
 
 
 @app.get("/", response_class=HTMLResponse)
