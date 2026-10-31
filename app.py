@@ -676,6 +676,49 @@ def parse_scores(text: str) -> dict:
     return out
 
 
+async def make_bench_question(cat: str) -> str:
+    """Pergunta de benchmark. Alguns modelos gratuitos devolvem texto vazio: tenta cada fornecedor e, se falhar, usa uma reserva."""
+    msgs = [{"role": "system", "content": TEACHER_SYSTEM},
+            {"role": "user", "content": f"Escreve UMA pergunta técnica avançada sobre: {cat}. Responde só com a pergunta, sem explicações."}]
+    for attempt in range(2):
+        for p in get_providers("public"):
+            if not candidate_keys(p):
+                continue
+            data, prov, model, _ = await try_providers(msgs, temperature=0.8, only=p["name"], timeout=45.0, max_tokens=300)
+            if data is None:
+                continue
+            q = reply_text(data).strip()
+            add_tokens(usage_tokens(data, q), prov)
+            if len(q) >= 25:
+                return q[:1200]
+    return (f"Explica em detalhe, com um exemplo prático, um conceito avançado de {cat} "
+            f"e indica os erros mais comuns ao aplicá-lo.")
+
+
+async def judge_scores(question: str, entries: list):
+    """Pede notas ao juiz; repete com outros fornecedores se a resposta não trouxer uma nota por modelo."""
+    letters = "ABC"
+    block = "\n\n".join(f"Resposta {letters[i]}:\n{txt}" for i, (_, txt) in enumerate(entries))
+    msgs = [{"role": "system", "content": "És um avaliador imparcial."},
+            {"role": "user", "content": f"Pergunta: {question}\n\n{block}\n\nDá a cada resposta nota de 0 a 100. Formato: "
+                                        + ";".join(f"{letters[i]}=<nota>" for i in range(len(entries)))
+                                        + ". Responde apenas nesse formato."}]
+    errs = []
+    for p in get_providers("public"):
+        if not candidate_keys(p):
+            continue
+        jdata, jprov, jmodel, jerr = await try_providers(msgs, temperature=0.0, only=p["name"], timeout=45.0, max_tokens=120)
+        errs += jerr
+        if jdata is None:
+            continue
+        add_tokens(usage_tokens(jdata), jprov)
+        sc = parse_scores(reply_text(jdata))
+        if all(letters[i] in sc for i in range(len(entries))):
+            return {name: sc[letters[i]] for i, (name, _) in enumerate(entries)}, errs
+        errs.append(f"{jprov}: notas incompletas")
+    return None, errs
+
+
 async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> dict:
     async with job_slot("benchmark", cat):
         t0 = time.time()
@@ -684,15 +727,8 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
             alive, why = await local_alive()
             if not alive:
                 raise RuntimeError("O servidor não consegue falar com o teu modelo: " + why + ".")
-        if not question:
-            qdata, qprov, qmodel, errors = await try_providers(
-                [{"role": "system", "content": TEACHER_SYSTEM},
-                 {"role": "user", "content": f"Escreve uma pergunta técnica avançada sobre: {cat}."}],
-                temperature=0.8, timeout=45.0, max_tokens=200)
-            if qdata is None:
-                raise RuntimeError("Erro ao gerar pergunta de benchmark: " + ("; ".join(errors[-3:]) or "sem fornecedores com chave") + ".")
-            question = reply_text(qdata)
-            add_tokens(usage_tokens(qdata, question), qprov)
+        if not question or len(question.strip()) < 15:
+            question = await make_bench_question(cat)
 
         recent = [k for k in DB_KNOWLEDGE if k.get("category") == cat][-2:]
         extra = "\n".join(f"- {k.get('title', '')}: {str(k.get('content', ''))[:350]}" for k in recent)
@@ -721,19 +757,14 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
                                "Confirma que está ligado (▶ Ligar modelo próprio) e com contexto de 4096.")
 
         entries = [("gois", g_txt)] + [x for x in (("gemini", gem_txt), ("deepseek", ds_txt)) if x[1]]
+        if len(entries) < 2:
+            raise RuntimeError("Nenhum modelo de referência (Gemini/DeepSeek) respondeu, por isso não há com quem comparar. "
+                               "Confirma as chaves GEMINI_API_KEY / OPENROUTER_API_KEY no Render e tenta de novo.")
         random.shuffle(entries)
         letters = "ABC"
-        block = "\n\n".join(f"Resposta {letters[i]}:\n{txt}" for i, (_, txt) in enumerate(entries))
-        jdata, jprov, jmodel, jerr = await try_providers(
-            [{"role": "system", "content": "És um avaliador imparcial."},
-             {"role": "user", "content": f"Pergunta: {question}\n\n{block}\n\nDá a cada resposta nota de 0 a 100. Formato: "
-                                          + ";".join(f"{letters[i]}=<nota>" for i in range(len(entries)))}],
-            temperature=0.0, timeout=45.0, max_tokens=60)
-        if jdata is None:
-            raise RuntimeError("Erro no juiz de benchmark: " + ("; ".join(jerr[-3:]) or "sem fornecedores com chave") + ".")
-        add_tokens(usage_tokens(jdata), jprov)
-        scores = parse_scores(reply_text(jdata))
-        by_name = {name: scores.get(letters[i]) for i, (name, _) in enumerate(entries)}
+        by_name, jerr = await judge_scores(question, entries)
+        if by_name is None:
+            raise RuntimeError("O juiz não devolveu notas válidas (" + ("; ".join(jerr[-3:]) or "sem detalhe") + "). Tenta de novo.")
 
         e = comp_entry(cat)
 
@@ -1087,14 +1118,7 @@ async def comparison_question(request: Request):
     cat = body.get("category")
     if cat not in CATEGORIES:
         raise HTTPException(400, "Categoria desconhecida.")
-    qdata, qprov, qmodel, errors = await try_providers(
-        [{"role": "system", "content": TEACHER_SYSTEM},
-         {"role": "user", "content": f"Escreve uma pergunta técnica avançada sobre: {cat}."}],
-        temperature=0.8, timeout=45.0, max_tokens=200)
-    if qdata is None:
-        raise HTTPException(502, "Erro ao gerar pergunta de benchmark: " + ("; ".join(errors[-3:]) or "sem fornecedores com chave") + ".")
-    question = reply_text(qdata)
-    add_tokens(usage_tokens(qdata, question), qprov)
+    question = await make_bench_question(cat)
     recent = [k for k in DB_KNOWLEDGE if k.get("category") == cat][-2:]
     context = "\n".join(f"- {k.get('title', '')}: {str(k.get('content', ''))[:350]}" for k in recent)
     return {"question": question, "context": context}
