@@ -285,6 +285,7 @@ LOCAL_PROVIDER = {
     "models": [os.environ.get("GOIS_LOCAL_MODEL", "").strip() or "local-model"],
     "extra_headers": {},
     "local": True,
+    "ctx": int(os.environ.get("GOIS_LOCAL_CTX", "2048") or 2048),   # contexto (tokens) com que o LM Studio carregou o modelo
 }
 
 
@@ -389,8 +390,24 @@ def prepare_messages(messages: list, is_admin: bool = False, extra_context: str 
         cleaned = [{"role": "user", "content": "Olá"}]
 
     sys_content = ADMIN_PROMPT if is_admin else PUBLIC_PROMPT
+    kn_limit = 2400
+    if is_admin and LOCAL_PROVIDER["url"]:
+        # ~3 caracteres por token; o prompt pode ocupar metade do contexto (a outra metade fica para a resposta).
+        budget = int(int(LOCAL_PROVIDER.get("ctx") or 2048) * 1.5)
+        kept, used = [], 0
+        for m in reversed(cleaned):                      # mantém as mensagens mais recentes que cabem em 60 % do orçamento
+            used += len(m["content"])
+            if kept and used > int(budget * 0.6):
+                break
+            kept.append(m)
+        cleaned = list(reversed(kept))
+        while len(cleaned) > 1 and cleaned[0]["role"] != "user":
+            cleaned.pop(0)
+        kn_limit = max(0, min(2400, budget - len(sys_content) - sum(len(m["content"]) for m in cleaned)))
     last_user = next((m["content"] for m in reversed(cleaned) if m["role"] == "user"), "")
-    ctx = "\n".join(x for x in (extra_context, knowledge_context(last_user)) if x)
+    ctx = "\n".join(x for x in (extra_context, knowledge_context(last_user, limit=kn_limit) if kn_limit >= 300 else "") if x)
+    if is_admin and LOCAL_PROVIDER["url"]:
+        ctx = ctx[:max(0, kn_limit)] if kn_limit >= 300 else ""
     if ctx:
         sys_content += "\n\nBase de conhecimento interno do gois.v1:\n" + ctx
     return [{"role": "system", "content": sys_content}] + cleaned
@@ -465,6 +482,9 @@ async def stream_llm_request(payload: dict, is_admin: bool = False):
                         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", **p["extra_headers"]}
                         body = {"model": model_name, "messages": messages,
                                 "temperature": payload.get("temperature", 0.6), "stream": True}
+                        if p.get("local"):                # resposta nunca maior do que o que sobra do contexto
+                            used_tok = sum(len(m["content"]) for m in messages) // 3 + 32
+                            body["max_tokens"] = max(256, int(p.get("ctx") or 2048) - used_tok)
                         async with client.stream("POST", p["url"], json=body, headers=headers,
                                                  timeout=httpx.Timeout(LOCAL_TIMEOUT if p.get("local") else 120.0, connect=15.0)) as resp:
                             if resp.status_code != 200:
@@ -619,7 +639,7 @@ async def run_benchmark(cat: str) -> dict:
              {"role": "user", "content": f"Escreve uma pergunta técnica avançada sobre: {cat}."}],
             temperature=0.8, timeout=45.0, max_tokens=200)
         if qdata is None:
-            raise RuntimeError("Erro ao gerar pergunta de benchmark.")
+            raise RuntimeError("Erro ao gerar pergunta de benchmark: " + ("; ".join(errors[-3:]) or "sem fornecedores com chave") + ".")
         question = reply_text(qdata)
         add_tokens(usage_tokens(qdata, question), qprov)
 
@@ -631,9 +651,9 @@ async def run_benchmark(cat: str) -> dict:
 
         async def ask(msgs, **kw):
             d, prov, model, _ = await try_providers(msgs, temperature=0.4, timeout=45.0, max_tokens=450, **kw)
-            return (reply_text(d), usage_tokens(d, reply_text(d)), prov) if d else ("", 0, None)
+            return (reply_text(d), usage_tokens(d, reply_text(d)), prov, []) if d else ("", 0, None, _)
 
-        (g_txt, g_tok, g_prov), (gem_txt, gem_tok, gem_prov), (ds_txt, ds_tok, ds_prov) = await asyncio.gather(
+        (g_txt, g_tok, g_prov, g_err), (gem_txt, gem_tok, gem_prov, _e1), (ds_txt, ds_tok, ds_prov, _e2) = await asyncio.gather(
             ask(gois_msgs, scope="admin"),
             ask(ref_msgs, only="Gemini"),
             ask(ref_msgs, only="OpenRouter", models=["deepseek/deepseek-chat-v3-0324:free"]),
@@ -642,7 +662,8 @@ async def run_benchmark(cat: str) -> dict:
         add_tokens(gem_tok, gem_prov)
         add_tokens(ds_tok, ds_prov)
         if not g_txt:
-            raise RuntimeError("O teu modelo está offline; liga-o no painel (▶ Ligar modelo próprio) para correr o benchmark.")
+            raise RuntimeError("O teu modelo não respondeu (" + ("; ".join(g_err[-2:]) or "sem detalhe") + "). "
+                               "Confirma que está ligado (▶ Ligar modelo próprio) e com contexto de 4096.")
 
         entries = [("gois", g_txt)] + [x for x in (("gemini", gem_txt), ("deepseek", ds_txt)) if x[1]]
         random.shuffle(entries)
@@ -654,7 +675,7 @@ async def run_benchmark(cat: str) -> dict:
                                           + ";".join(f"{letters[i]}=<nota>" for i in range(len(entries)))}],
             temperature=0.0, timeout=45.0, max_tokens=60)
         if jdata is None:
-            raise RuntimeError("Erro no juiz de benchmark.")
+            raise RuntimeError("Erro no juiz de benchmark: " + ("; ".join(jerr[-3:]) or "sem fornecedores com chave") + ".")
         add_tokens(usage_tokens(jdata), jprov)
         scores = parse_scores(reply_text(jdata))
         by_name = {name: scores.get(letters[i]) for i, (name, _) in enumerate(entries)}
@@ -816,6 +837,11 @@ async def local_config(request: Request):
         LOCAL_PROVIDER["url"] = _local_chat_url(url)
     if body.get("model"):
         LOCAL_PROVIDER["models"] = [str(body["model"]).strip()]
+    if body.get("ctx"):
+        try:
+            LOCAL_PROVIDER["ctx"] = min(131072, max(512, int(body["ctx"])))
+        except Exception:
+            raise HTTPException(400, "ctx inválido.")
     return {"url_set": bool(LOCAL_PROVIDER["url"]), "model": LOCAL_PROVIDER["models"][0],
             "routing": "admin=modelo próprio; público=fornecedores"}
 
@@ -834,7 +860,7 @@ async def local_status(request: Request):
                 error = f"HTTP {r.status_code}"
         except Exception as e:
             error = type(e).__name__
-    return {"url_set": bool(base), "online": online, "error": error,
+    return {"url_set": bool(base), "online": online, "error": error, "ctx": LOCAL_PROVIDER.get("ctx"),
             "model": LOCAL_PROVIDER["models"][0], "routing": "admin=modelo próprio; público=fornecedores"}
 
 
