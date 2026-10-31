@@ -433,7 +433,7 @@ TEACHER_SYSTEM = "És o sistema de ensino interno do gois.v1. Produz conteúdos 
 
 async def learn_category(cat: str, provider: str = "auto") -> dict:
     async with JOB_LOCK:
-        covered = [k.get("title", "") for k in DB_KNOWLEDGE if k.get("category"] == cat][-12:]
+        covered = [k.get("title", "") for k in DB_KNOWLEDGE if k.get("category") == cat][-12:]
         prompt = (
             f"Categoria: {cat}\n"
             f"Subtópicos já estudados: {'; '.join(covered) or 'nenhum'}\n\n"
