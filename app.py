@@ -719,6 +719,65 @@ async def judge_scores(question: str, entries: list):
     return None, errs
 
 
+_DS_CACHE = {"ts": 0.0, "models": []}
+
+
+async def deepseek_models() -> list:
+    """Modelos DeepSeek gratuitos que existem AGORA no OpenRouter (os nomes mudam / são retirados com frequência)."""
+    if _DS_CACHE["models"] and time.time() - _DS_CACHE["ts"] < 3600:
+        return list(_DS_CACHE["models"])
+    found = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get("https://openrouter.ai/api/v1/models")
+        for m in (r.json().get("data") or []):
+            mid = str(m.get("id") or "")
+            pr = m.get("pricing") or {}
+            free = mid.endswith(":free") or (str(pr.get("prompt")) == "0" and str(pr.get("completion")) == "0")
+            if "deepseek" in mid.lower() and free:
+                found.append(mid)
+    except Exception as e:
+        logger.warning("Lista de modelos OpenRouter indisponível: %s", e)
+    found.sort(key=lambda x: (0 if ("chat" in x or "v3" in x) else 1, x))
+    models = found[:3] or ["deepseek/deepseek-chat-v3-0324:free"]
+    _DS_CACHE.update(ts=time.time(), models=models)
+    return list(models)
+
+
+async def probe_provider(name: str, models=None) -> dict:
+    """Teste real e mínimo (5 tokens) de chave + ligação a um fornecedor."""
+    p = next((x for x in PROVIDERS if x["name"] == name), None)
+    if not p:
+        return {"ok": False, "state": "error", "detail": "fornecedor desconhecido"}
+    keys = candidate_keys(p)
+    if not keys:
+        return {"ok": False, "state": "nokey", "env": p["env"], "detail": f"falta a variável {p['env']} no Render (Environment)"}
+    last = ""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=10.0)) as client:
+        for model in (models or p["models"]):
+            try:
+                headers = {"Authorization": f"Bearer {keys[0]}", "Content-Type": "application/json", **p["extra_headers"]}
+                r = await client.post(p["url"], headers=headers, json={
+                    "model": model, "messages": [{"role": "user", "content": "ok"}], "max_tokens": 5})
+                if r.status_code == 200:
+                    return {"ok": True, "state": "ok", "env": p["env"], "detail": f"{model} respondeu"}
+                msg = ""
+                try:
+                    j = r.json()
+                    if isinstance(j, list) and j:
+                        j = j[0]
+                    e = j.get("error") if isinstance(j, dict) else None
+                    msg = str(e.get("message") or "") if isinstance(e, dict) else str(e or "")
+                except Exception:
+                    msg = (r.text or "")[:100]
+                last = f"{model}: HTTP {r.status_code} {msg[:120]}".strip()
+                if r.status_code in (401, 403):
+                    break
+            except Exception as e:
+                last = f"{model}: {type(e).__name__}"
+    return {"ok": False, "state": "error", "env": p["env"], "detail": last or "sem resposta"}
+
+
 async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> dict:
     async with job_slot("benchmark", cat):
         t0 = time.time()
@@ -744,10 +803,11 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
         async def given_answer():
             return gois_answer, max(1, len(gois_answer) // 4), "gois-local", []
 
+        ds_models = (await deepseek_models())[:3]
         (g_txt, g_tok, g_prov, g_err), (gem_txt, gem_tok, gem_prov, _e1), (ds_txt, ds_tok, ds_prov, _e2) = await asyncio.gather(
             (given_answer() if gois_answer else ask(gois_msgs, scope="admin")),
             ask(ref_msgs, only="Gemini"),
-            ask(ref_msgs, only="OpenRouter", models=["deepseek/deepseek-chat-v3-0324:free"]),
+            ask(ref_msgs, only="OpenRouter", models=ds_models),
         )
         add_tokens(g_tok, g_prov)
         add_tokens(gem_tok, gem_prov)
@@ -940,6 +1000,21 @@ async def local_status(request: Request):
     online, error = await local_alive(retries=1, timeout=15.0) if base else (False, "")
     return {"url_set": bool(base), "online": online, "error": error, "ctx": LOCAL_PROVIDER.get("ctx"),
             "model": LOCAL_PROVIDER["models"][0], "routing": "admin=modelo próprio; público=fornecedores"}
+
+
+@app.get("/api/health/models")
+async def health_models(request: Request):
+    """Estado de chave + ligação do gois.v1 (túnel), Gemini e DeepSeek (via OpenRouter)."""
+    await require_admin(request)
+    dsm = (await deepseek_models())[:3]
+    if local_base_url():
+        alive, why = await local_alive(retries=1, timeout=15.0)
+    else:
+        alive, why = False, "sem URL do modelo no servidor"
+    gois = {"ok": alive, "state": "ok" if alive else "error",
+            "detail": "o servidor alcança o LM Studio pelo túnel" if alive else why}
+    gem, ds = await asyncio.gather(probe_provider("Gemini"), probe_provider("OpenRouter", dsm))
+    return {"gois": gois, "gemini": gem, "deepseek": ds, "checked": now_iso()}
 
 
 @app.get("/api/job")
