@@ -542,6 +542,9 @@ class GoisWindow(tk.Tk):
         self.after(100, self.pump)
         self.after(200, self.anim_tick)
         self.after(3_500, self.health_tick)
+        self.models_health = None          # último resultado de /api/health/models (+ teste local do LM Studio)
+        self._mh_busy = False
+        self.after(6_000, self.models_health_tick)
         self.after(4_500, self.job_tick)
         self.after(400, self.first_run_token)
         atexit.register(self.stop_tunnel)              # não deixa o túnel aberto ao fechar o painel
@@ -647,7 +650,7 @@ class GoisWindow(tk.Tk):
     def card(self, parent, **kw):
         return tk.Frame(parent, bg=THEME["panel"], highlightbackground=THEME["border"], highlightthickness=1, **kw)
 
-    def kpi_card(self, parent, key, title, color=None, big=False):
+    def kpi_card(self, parent, key, title, color=None, big=False, status=False):
         f = self.card(parent)
         f.pack(side=tk.LEFT, padx=(0, 8), fill=tk.Y)
         top = tk.Frame(f, bg=THEME["panel"])
@@ -658,12 +661,19 @@ class GoisWindow(tk.Tk):
         val = tk.Label(f, text="—", fg=color or THEME["fg"], bg=THEME["panel"], font=("Segoe UI Semibold", 22 if big else 14))
         val.pack(anchor=tk.W, padx=12)
         sub = tk.Label(f, text="", fg=THEME["muted"], bg=THEME["panel"], font=("Segoe UI", 8))
-        sub.pack(anchor=tk.W, padx=12, pady=(0, 8))
+        sub.pack(anchor=tk.W, padx=12, pady=(0, 0 if status else 8))
         self.kpi[key] = (val, sub)
+        if status:
+            st = tk.Label(f, text="… a verificar chave e ligação", fg=THEME["muted"], bg=THEME["panel"],
+                          font=("Segoe UI Semibold", 8), cursor="hand2", wraplength=170, justify=tk.LEFT, anchor="w")
+            st.pack(anchor=tk.W, padx=12, pady=(0, 8))
+            st.bind("<Button-1>", lambda _e, k=key: self.show_model_health(k))
+            self.kpi_status[key] = st
 
     # ---------------- UI base ----------------
     def build_ui(self):
         self.kpi = {}
+        self.kpi_status = {}
         self.lamps = []
         header = tk.Frame(self, bg=THEME["panel"], height=54, highlightbackground=THEME["border"], highlightthickness=1)
         header.pack(side=tk.TOP, fill=tk.X)
@@ -697,9 +707,9 @@ class GoisWindow(tk.Tk):
         # totais gerais sempre visíveis
         strip = tk.Frame(self, bg=THEME["bg"])
         strip.pack(side=tk.TOP, fill=tk.X, padx=16, pady=(10, 2))
-        self.kpi_card(strip, "gois", "gois.v1 · total geral", series_color("gois"), big=True)
-        self.kpi_card(strip, "gemini", "Gemini · total geral", series_color("gemini"), big=True)
-        self.kpi_card(strip, "deepseek", "DeepSeek · total geral", series_color("deepseek"), big=True)
+        self.kpi_card(strip, "gois", "gois.v1 · total geral", series_color("gois"), big=True, status=True)
+        self.kpi_card(strip, "gemini", "Gemini · total geral", series_color("gemini"), big=True, status=True)
+        self.kpi_card(strip, "deepseek", "DeepSeek · total geral", series_color("deepseek"), big=True, status=True)
         tk.Frame(strip, bg=THEME["border"], width=1).pack(side=tk.LEFT, fill=tk.Y, padx=(2, 10), pady=4)
         self.kpi_card(strip, "par_gem", "Paridade vs Gemini")
         self.kpi_card(strip, "par_ds", "Paridade vs DeepSeek")
@@ -1908,6 +1918,7 @@ class GoisWindow(tk.Tk):
             self.set_class_busy(False)
             if err:
                 self.class_log(f"❌ Erro no benchmark [{cat}]: {err}")
+                self.models_health_now()
                 self.flash(f"❌ Benchmark [{cat}] falhou: {self.short(err, 110)} (vê o registo da Sala de Aula)", THEME["danger"], 25000)
                 if then:
                     self.class_log("⛔ Série de benchmarks parada no primeiro erro (para não gastar tokens).")
@@ -2535,6 +2546,94 @@ class GoisWindow(tk.Tk):
             self.refresh_lamps()
 
         self.bg(lambda: self.api.call("GET", "/api/local/status", timeout=25), done)
+
+    # ---------- estado de chaves e ligações dos 3 modelos ----------
+    def local_lm_ok(self):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{LM_PORT}/v1/models", timeout=4) as r:
+                return r.status == 200
+        except Exception:
+            return False
+
+    def models_health_tick(self):
+        self.after(120_000, self.models_health_tick)
+        self.models_health_now()
+
+    def models_health_now(self):
+        if self._mh_busy:
+            return
+        if not (self.connected and self.is_admin):
+            self.models_health = {"nosession": True}
+            self.refresh_model_status()
+            return
+        self._mh_busy = True
+
+        def work():
+            local = self.local_lm_ok()
+            try:
+                srv = self.api.call("GET", "/api/health/models", timeout=100)
+            except Exception as e:
+                srv = {"_error": str(e)}
+            return {"local": local, "srv": srv}
+
+        def done(res, err):
+            self._mh_busy = False
+            self.models_health = res if not err else {"srv": {"_error": str(err)}, "local": False}
+            self.refresh_model_status()
+
+        self.bg(work, done)
+
+    def model_status_view(self, key):
+        """(texto curto, cor, detalhe completo) para o cartão de cada modelo."""
+        mh = self.models_health
+        if mh is None:
+            return "… a verificar chave e ligação", THEME["muted"], "Ainda não verificado."
+        if mh.get("nosession"):
+            return "— sem sessão de administrador", THEME["muted"], "Entra como admin para verificar as chaves."
+        srv = mh.get("srv") or {}
+        if key == "gois":
+            local = bool(mh.get("local"))
+            tun = srv.get("gois") or {}
+            if not local:
+                return ("✖ LM Studio local não responde", THEME["danger"],
+                        f"Sem resposta em 127.0.0.1:{LM_PORT}. Abre o LM Studio, carrega o modelo e inicia o servidor local.")
+            if srv.get("_error"):
+                return ("⚠ LM Studio OK · servidor sem resposta", THEME["warn"],
+                        "O LM Studio local responde (o benchmark funciona), mas o servidor Render não respondeu: " + srv["_error"])
+            if tun.get("ok"):
+                return "✔ LM Studio e túnel OK", THEME["bot"], "LM Studio local OK e o servidor alcança-o pelo túnel."
+            return ("⚠ LM Studio OK · túnel em baixo", THEME["warn"],
+                    "O LM Studio local responde (o benchmark funciona), mas o servidor não o alcança: "
+                    + str(tun.get("detail") or "sem detalhe") + ". O chat de admin pode dar «offline»; carrega em ▶ Ligar modelo próprio.")
+        if srv.get("_error"):
+            return "✖ servidor sem resposta", THEME["danger"], str(srv["_error"])
+        r = srv.get(key) or {}
+        detail = str(r.get("detail") or "sem detalhe")
+        if r.get("ok"):
+            return "✔ chave e ligação OK", THEME["bot"], detail
+        if r.get("state") == "nokey":
+            return f"✖ sem chave ({r.get('env', '')})", THEME["danger"], detail
+        if "429" in detail:
+            return "⚠ limite de uso atingido (429)", THEME["warn"], detail + "\nA chave existe, mas o fornecedor está a limitar pedidos; tenta mais tarde."
+        if "HTTP 401" in detail or "HTTP 403" in detail:
+            return "✖ chave inválida / sem permissão", THEME["danger"], detail
+        return "✖ erro: " + self.short(detail, 44), THEME["danger"], detail
+
+    def refresh_model_status(self):
+        for k, lbl in list(getattr(self, "kpi_status", {}).items()):
+            try:
+                txt, col, _d = self.model_status_view(k)
+                lbl.config(text=txt, fg=col)
+            except tk.TclError:
+                pass
+
+    def show_model_health(self, key):
+        txt, _c, detail = self.model_status_view(key)
+        name = {"gois": "gois.v1", "gemini": "Gemini", "deepseek": "DeepSeek (OpenRouter)"}.get(key, key)
+        when = ((self.models_health or {}).get("srv") or {}).get("checked") or ""
+        messagebox.showinfo(f"Estado · {name}", f"{txt}\n\n{detail}\n\nVerificado: {when or '—'}\n"
+                            "(clica noutra vez após corrigir a chave no Render e fazer deploy)", parent=self)
+        self.models_health_now()
 
     def health_tick(self):
         self.after(20_000, self.health_tick)
