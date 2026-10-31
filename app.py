@@ -293,6 +293,25 @@ def local_base_url() -> str:
     return LOCAL_PROVIDER["url"][: -len("/chat/completions")] if LOCAL_PROVIDER["url"] else ""
 
 
+async def local_alive(retries: int = 3, timeout: float = 20.0):
+    """(online, motivo). Tenta várias vezes: o túnel + LM Studio ocupado podem demorar >8 s a responder."""
+    base = local_base_url()
+    if not base:
+        return False, "sem URL do modelo no servidor (o Render reiniciou e perdeu a ligação: carrega em ▶ Ligar modelo próprio)"
+    reason = ""
+    for i in range(max(1, retries)):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(base + "/models")
+            if r.status_code == 200:
+                return True, ""
+            reason = f"HTTP {r.status_code}"
+        except Exception as e:
+            reason = type(e).__name__ or "erro de ligação"
+        await asyncio.sleep(2)
+    return False, reason
+
+
 def get_providers(scope: str = "public") -> list:
     """Quem pode responder, por papel.
 
@@ -623,17 +642,10 @@ def parse_scores(text: str) -> dict:
 async def run_benchmark(cat: str) -> dict:
     async with job_slot("benchmark", cat):
         t0 = time.time()
-        # Falha logo (sem gastar tokens) se o teu modelo não estiver ligado ao servidor.
-        offline = "O teu modelo está offline ou sem túnel; no painel carrega em ▶ Ligar modelo próprio e tenta de novo."
-        if not LOCAL_PROVIDER["url"]:
-            raise RuntimeError(offline)
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                alive = (await client.get(local_base_url() + "/models")).status_code == 200
-        except Exception:
-            alive = False
+        # Falha logo (sem gastar tokens) só se o modelo estiver MESMO inacessível (3 tentativas).
+        alive, why = await local_alive()
         if not alive:
-            raise RuntimeError(offline)
+            raise RuntimeError("O servidor não consegue falar com o teu modelo: " + why + ".")
         qdata, qprov, qmodel, errors = await try_providers(
             [{"role": "system", "content": TEACHER_SYSTEM},
              {"role": "user", "content": f"Escreve uma pergunta técnica avançada sobre: {cat}."}],
@@ -650,7 +662,8 @@ async def run_benchmark(cat: str) -> dict:
         ref_msgs = [{"role": "system", "content": "Responde de forma rigorosa e concisa."}, {"role": "user", "content": question}]
 
         async def ask(msgs, **kw):
-            d, prov, model, _ = await try_providers(msgs, temperature=0.4, timeout=45.0, max_tokens=450, **kw)
+            tmo = 150.0 if kw.get("scope") == "admin" else 45.0
+            d, prov, model, _ = await try_providers(msgs, temperature=0.4, timeout=tmo, max_tokens=450, **kw)
             return (reply_text(d), usage_tokens(d, reply_text(d)), prov, []) if d else ("", 0, None, _)
 
         (g_txt, g_tok, g_prov, g_err), (gem_txt, gem_tok, gem_prov, _e1), (ds_txt, ds_tok, ds_prov, _e2) = await asyncio.gather(
@@ -683,7 +696,7 @@ async def run_benchmark(cat: str) -> dict:
         e = comp_entry(cat)
 
         def ema(prev, new):
-            return new if prev is None or new is None else round(prev * 0.5 + new * 0.5, 1)
+            return prev if new is None else (new if prev is None else round(prev * 0.5 + new * 0.5, 1))
 
         e["gois_score"] = ema(e["gois_score"], by_name.get("gois"))
         if by_name.get("gemini") is not None:
@@ -850,16 +863,8 @@ async def local_config(request: Request):
 async def local_status(request: Request):
     """Diz se o servidor consegue falar com o teu LM Studio neste momento."""
     await require_admin(request)
-    base, online, error = local_base_url(), False, ""
-    if base:
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                r = await client.get(base + "/models")
-            online = r.status_code == 200
-            if not online:
-                error = f"HTTP {r.status_code}"
-        except Exception as e:
-            error = type(e).__name__
+    base = local_base_url()
+    online, error = await local_alive(retries=1, timeout=15.0) if base else (False, "")
     return {"url_set": bool(base), "online": online, "error": error, "ctx": LOCAL_PROVIDER.get("ctx"),
             "model": LOCAL_PROVIDER["models"][0], "routing": "admin=modelo próprio; público=fornecedores"}
 
