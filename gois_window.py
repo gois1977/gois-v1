@@ -12,7 +12,10 @@ import json
 import time
 import queue
 import threading
+import atexit
+import shutil
 import subprocess
+import webbrowser
 import zipfile
 import urllib.request
 import urllib.error
@@ -48,6 +51,7 @@ except Exception as _e:  # gois_skills.py em falta/corrompido: a app abre na mes
 
 APP_NAME = "gois.v1 | Office & Command Center"
 DEFAULT_SERVER = "https://gois-v1.onrender.com"
+COLAB_HOST = "https://colab.research.google.com/"
 
 DATA_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "gois_v1"
 CONFIG_FILE = DATA_DIR / "config.json"
@@ -56,6 +60,7 @@ LOCAL_SKILLS_FILE = DATA_DIR / "skills.json"          # skills criadas por ti
 KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"          # cópia local das lições da Sala de Aula
 
 APP_VERSION = "2.3"
+STATE_BACKUP_FILE = DATA_DIR / "state_backup.json"      # cópia do estado do servidor (notas, tokens, limites) para repor após um reinício
 COMP_CACHE_FILE = DATA_DIR / "settings_cache.json"      # última leitura do servidor (mostra dados mesmo offline)
 HISTORY_FILE = DATA_DIR / "comparison_history.json"     # histórico dos totais para o gráfico de evolução
 
@@ -226,6 +231,148 @@ def read_attachment(path: str):
     return text, note
 
 
+DATASET_SYSTEM = "Tu és o gois.v1, um assistente técnico. Responde em português europeu, de forma direta e completa."
+
+
+def build_dataset_rows(lessons, min_chars=200):
+    """Converte lições da Sala de Aula em exemplos de afinação (formato chat 'messages').
+
+    Devolve (linhas, ignoradas). Ignora lições vazias/curtas e títulos repetidos.
+    """
+    rows, seen, skipped = [], set(), 0
+    for k in lessons:
+        title = str(k.get("title") or "").strip()
+        body = str(k.get("content") or "").strip()
+        key = title.lower()
+        if not title or len(body) < min_chars or key in seen:
+            skipped += 1
+            continue
+        seen.add(key)
+        cat = str(k.get("category") or "").strip()
+        question = f"Explica em detalhe e com exemplos práticos: {title}" + (f" (área: {cat})" if cat else "")
+        rows.append({"messages": [
+            {"role": "system", "content": DATASET_SYSTEM},
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": body},
+        ]})
+    return rows, skipped
+
+
+# --------------------------------------------------------------------------- #
+# Modelo próprio (LM Studio + túnel) — funções auxiliares
+# --------------------------------------------------------------------------- #
+LM_PORT = 1234                      # porta por defeito do servidor do LM Studio
+LOCAL_IDENTIFIER = "gois-v1"        # nome com que o modelo fica carregado (usado pelo servidor)
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_TUNNEL_RE = re.compile(r"https://([a-z0-9-]+)\.trycloudflare\.com", re.I)
+
+
+def find_exe(name, extras=()):
+    found = shutil.which(name)
+    if found:
+        return found
+    for c in extras:
+        p = Path(c).expanduser()
+        if p.is_file():
+            return str(p)
+    return ""
+
+
+def find_lms():
+    home = Path.home()
+    return find_exe("lms", [home / ".lmstudio" / "bin" / "lms.exe", home / ".lmstudio" / "bin" / "lms"])
+
+
+def find_cloudflared():
+    return find_exe("cloudflared", [r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
+                                    r"C:\Program Files\cloudflared\cloudflared.exe", Path.home() / "cloudflared.exe"])
+
+
+def extract_tunnel_url(text):
+    """Primeiro https://xxxx.trycloudflare.com da linha (ignora api.trycloudflare.com, que é o serviço)."""
+    for m in _TUNNEL_RE.finditer(text or ""):
+        if m.group(1).lower() != "api":
+            return m.group(0)
+    return ""
+
+
+def run_cmd(args, timeout=60):
+    """Corre um comando sem abrir janela. Devolve (código, saída)."""
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, creationflags=CREATE_NO_WINDOW)
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    except subprocess.TimeoutExpired:
+        return -1, f"Tempo esgotado ({timeout}s)."
+    except Exception as e:
+        return -1, str(e)
+
+
+def default_models_dir():
+    for c in (Path.home() / ".lmstudio" / "models", Path.home() / ".cache" / "lm-studio" / "models"):
+        if c.is_dir():
+            return str(c)
+    return str(Path.home() / ".lmstudio" / "models")
+
+
+def newest_gguf(folder, pattern="gois-v1-*.gguf", settle_s=20):
+    """Ficheiro .gguf mais recente na pasta, ignorando os que ainda estão a ser descarregados/sincronizados."""
+    try:
+        base = Path(folder)
+        if not folder or not base.is_dir():
+            return None
+        best, now = None, time.time()
+        for p in base.glob(pattern):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if now - st.st_mtime < settle_s:
+                continue
+            if best is None or st.st_mtime > best[0]:
+                best = (st.st_mtime, p)
+        return best[1] if best else None
+    except Exception:
+        return None
+
+
+def gguf_signature(p):
+    st = Path(p).stat()
+    return f"{Path(p).name}|{st.st_size}|{int(st.st_mtime)}"
+
+
+def install_gguf(src, models_dir):
+    """Copia o .gguf para <modelos do LM Studio>/gois/gois-v1/ (estrutura editor/modelo/ficheiro)."""
+    src = Path(src)
+    dest_dir = Path(models_dir) / "gois" / "gois-v1"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    if not dest.exists() or dest.stat().st_size != src.stat().st_size:
+        tmp = dest_dir / (src.name + ".part")
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    return dest
+
+
+def pick_model_key(ls_output, hint):
+    """Procura em `lms ls --json` a chave do modelo cujo caminho contém `hint` (devolve '' se não houver)."""
+    try:
+        text = ls_output[ls_output.index("["):]
+        models = json.loads(text)
+    except Exception:
+        return ""
+    hint = (hint or "").lower()
+    best = ""
+    for m in models if isinstance(models, list) else []:
+        if not isinstance(m, dict):
+            continue
+        key = str(m.get("modelKey") or m.get("path") or "")
+        path = str(m.get("path") or key)
+        if hint and hint in (key + " " + path).lower():
+            best = key
+    return best
+
+
 class ApiError(Exception):
     def __init__(self, msg, code=0):
         super().__init__(msg)
@@ -314,6 +461,13 @@ class GoisWindow(tk.Tk):
         self._conn_after = None
         self._poll_after = None
         self.ui_q = queue.Queue()
+        self.local_proc = None
+        self.local_url = ""
+        self.local_busy = False
+        self._installing = False
+        self._local_after = None
+        self.local_log_lines = []
+        self.local_status_state = ("⚪ Parado", "muted")
 
         self.setup_styles()
         self.build_ui()
@@ -328,6 +482,10 @@ class GoisWindow(tk.Tk):
         self._bench_after = self.after(90_000, self.bench_tick)
         self.after(100, self.pump)
         self.after(400, self.first_run_token)
+        atexit.register(self.stop_tunnel)              # não deixa o túnel aberto ao fechar o painel
+        self.after(15_000, self.local_watch_tick)      # procura .gguf novo (instalação automática)
+        if self.cfg.get("auto_start_local"):
+            self.after(8_000, lambda: self.auto_start_tick(0))
         if SKILLS_ERROR:
             self.after(600, lambda: messagebox.showwarning(
                 "Skills integradas", "Não consegui carregar gois_skills.py (tem de estar na mesma pasta que gois_window.py).\n\n"
@@ -482,6 +640,7 @@ class GoisWindow(tk.Tk):
         self.kpi_card(strip, "par_ds", "Paridade vs DeepSeek")
         self.kpi_card(strip, "lessons", "Lições")
         self.kpi_card(strip, "skills", "Skills")
+        self.kpi_card(strip, "capacity", "Capacidade restante hoje (estim.)")
         self.kpi_card(strip, "tokens", "Tokens hoje")
 
         self.notebook = ttk.Notebook(self)
@@ -491,17 +650,20 @@ class GoisWindow(tk.Tk):
         self.tab_class = tk.Frame(self.notebook, bg=THEME["bg"])
         self.tab_skills = tk.Frame(self.notebook, bg=THEME["bg"])
         self.tab_sys = tk.Frame(self.notebook, bg=THEME["bg"])
+        self.tab_local = tk.Frame(self.notebook, bg=THEME["bg"])
         self.notebook.add(self.tab_chat, text="💬 Chat & Histórico")
         self.notebook.add(self.tab_comp, text="📊 Comparação Live")
         self.notebook.add(self.tab_class, text="🏫 Sala de Aula")
         self.notebook.add(self.tab_skills, text="🧠 Skills")
         self.notebook.add(self.tab_sys, text="🛠 Sistema")
+        self.notebook.add(self.tab_local, text="🤖 Modelo próprio")
 
         self.build_chat_tab()
         self.build_comparison_tab()
         self.build_classroom_tab()
         self.build_skills_tab()
         self.build_system_tab()
+        self.build_local_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
     def toggle_theme(self):
@@ -534,6 +696,7 @@ class GoisWindow(tk.Tk):
         if self.server_settings:
             self.apply_settings(self.server_settings, cached=True)
         self.class_log_restore()
+        self.local_ui_restore()
         self.update_kpis()
         self.refresh_system_tab()
         self.refresh_live_ui()
@@ -643,7 +806,7 @@ class GoisWindow(tk.Tk):
         win = tk.Toplevel(self)
         win.title("Definições")
         win.configure(bg=THEME["panel"])
-        win.geometry("560x540")
+        win.geometry("560x620")
         win.transient(self)
         win.grab_set()
 
@@ -656,10 +819,12 @@ class GoisWindow(tk.Tk):
 
         e_server = row("URL do servidor", self.cfg["server"])
         e_token = row("Token de administrador (igual ao ADMIN_TOKEN do servidor)", self.cfg.get("token", ""), show="•")
+        e_colab = row("URL do notebook no Colab (https://colab.research.google.com/...)", self.cfg.get("colab_url", ""))
 
         def save():
             self.cfg["server"] = e_server.get().strip().rstrip("/") or DEFAULT_SERVER
             self.cfg["token"] = e_token.get().strip()
+            self.cfg["colab_url"] = e_colab.get().strip()
             self.save_config()
             self.api.cfg = self.cfg
             self.connected = False
@@ -1839,6 +2004,15 @@ class GoisWindow(tk.Tk):
             self.kpi["lessons"][1].config(text="na Sala de Aula")
             self.kpi["skills"][0].config(text=str(len(self.all_skills())))
             self.kpi["skills"][1].config(text=f"{len(BUILTIN_SKILLS)} integradas")
+            cap = self.server_settings.get("capacity") or {}
+            if cap.get("total_capacity"):
+                self.kpi["capacity"][0].config(text=self.fmt_tok(cap.get("total_remaining", 0)))
+                names = [n for n, r in (cap.get("providers") or {}).items() if r.get("capacity")]
+                self.kpi["capacity"][1].config(
+                    text=f"de {self.fmt_tok(cap['total_capacity'])} · {', '.join(names)} (estimativa)")
+            else:
+                self.kpi["capacity"][0].config(text="—")
+                self.kpi["capacity"][1].config(text="define-a na Sala de Aula")
             used = int(tok.get("used_today", 0) or 0)
             self.kpi["tokens"][0].config(text=f"{used:,}".replace(",", "."))
             self.kpi["tokens"][1].config(text="limite " + (f"{int(tok.get('daily_limit', 0)):,}".replace(",", ".") if tok.get("daily_limit") else "∞"))
@@ -1897,7 +2071,8 @@ class GoisWindow(tk.Tk):
                 ("Modo de acesso", mode),
                 ("Skills (neste PC / no servidor)", f"{len(self.all_skills())} / {h.get('skills', '—')}"),
                 ("Lições (neste PC / no servidor)", f"{len(self.kb_cache)} / {h.get('lessons', '—')}"),
-                ("Fornecedores com chave", ", ".join(s.get("providers_with_key", [])) or "—"),
+                ("Roteamento do chat", "Admin → só o teu modelo · Público → só fornecedores"),
+                ("Fornecedores com chave (público + Sala de Aula)", ", ".join(s.get("providers_with_key", [])) or "—"),
                 ("Professor atual", s.get("current_teacher") or "—"),
                 ("Modo autónomo", "ligado" if s.get("learning_now") else "desligado"),
                 ("Tokens hoje / limite / total", f"{tok.get('used_today', 0)} / {tok.get('daily_limit', 0) or '∞'} / {tok.get('used_total', 0)}"),
@@ -1920,6 +2095,9 @@ class GoisWindow(tk.Tk):
         top = tk.Frame(self.tab_class, bg=THEME["bg"])
         top.pack(fill=tk.X, padx=20, pady=(14, 4))
         tk.Label(top, text="🏫 Sala de Aula Autónoma", bg=THEME["bg"], fg=THEME["fg"], font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
+        self.btn(top, "📦 Exportar dataset", self.export_dataset, THEME["accent_blue"]).pack(side=tk.RIGHT)
+        self.btn(top, "🧪 Testar Colab", self.test_colab).pack(side=tk.RIGHT, padx=6)
+        self.btn(top, "🚀 Atualizar modelo (Colab)", self.update_model_colab, THEME["accent"]).pack(side=tk.RIGHT, padx=6)
         self.class_status = tk.Label(self.tab_class, text="Sala de Aula: a verificar…", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT)
         self.class_status.pack(fill=tk.X, padx=20)
         self.tokens_lbl = tk.Label(self.tab_class, text="🔋 Tokens hoje: —", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), anchor=tk.W)
@@ -1937,6 +2115,21 @@ class GoisWindow(tk.Tk):
         self.limit_var = tk.StringVar(value="0")
         tk.Entry(ctrl, textvariable=self.limit_var, width=10, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT).pack(side=tk.LEFT, ipady=3)
         self.btn(ctrl, "Guardar", self.save_daily_limit).pack(side=tk.LEFT, padx=4)
+
+        capf = tk.Frame(self.tab_class, bg=THEME["bg"])
+        capf.pack(fill=tk.X, padx=20, pady=(0, 4))
+        tk.Label(capf, text="Capacidade/dia estimada (0 = desconhecida):", bg=THEME["bg"], fg=THEME["muted"],
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.cap_vars = {}
+        self._cap_loaded = False
+        for name in ("Groq", "Gemini", "OpenRouter", "Mistral"):
+            tk.Label(capf, text=name, bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(10, 3))
+            var = tk.StringVar(value="0")
+            self.cap_vars[name] = var
+            tk.Entry(capf, textvariable=var, width=9, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white",
+                     relief=tk.FLAT).pack(side=tk.LEFT, ipady=3)
+        self.btn(capf, "Guardar", self.save_capacity).pack(side=tk.LEFT, padx=6)
+        self.btn(capf, "→ 75 % no limite/dia", self.suggest_lesson_limit).pack(side=tk.LEFT)
 
         pw = tk.PanedWindow(self.tab_class, orient=tk.HORIZONTAL, bg=THEME["border"], sashwidth=4)
         pw.pack(fill=tk.BOTH, expand=True, padx=20, pady=6)
@@ -2061,6 +2254,45 @@ class GoisWindow(tk.Tk):
 
         self.bg(lambda: self.api.call("POST", "/api/settings", {"learning_now": new}), done)
 
+    @staticmethod
+    def fmt_tok(n):
+        return f"{int(n or 0):,}".replace(",", ".")
+
+    @staticmethod
+    def parse_tok(raw):
+        """'300k' -> 300000 ; '1m' -> 1000000 ; vazio -> 0. Levanta ValueError se inválido."""
+        raw = (raw or "").strip().lower().replace(".", "").replace(",", "").replace(" ", "")
+        mult = 1
+        if raw.endswith("k"):
+            raw, mult = raw[:-1], 1_000
+        elif raw.endswith("m"):
+            raw, mult = raw[:-1], 1_000_000
+        return int(raw or 0) * mult
+
+    def save_capacity(self):
+        if not self.require_admin_ui():
+            return
+        try:
+            caps = {n: self.parse_tok(v.get()) for n, v in self.cap_vars.items()}
+        except ValueError:
+            messagebox.showwarning("Capacidade", "Número inválido (ex.: 300000 ou 300k).", parent=self)
+            return
+
+        def done(res, err):
+            self.class_log(f"❌ {err}" if err else "🔋 Capacidade diária estimada guardada.")
+            if not err:
+                self._cap_loaded = False
+                self.apply_settings(res)
+
+        self.bg(lambda: self.api.call("POST", "/api/settings", {"provider_capacity": caps}), done)
+
+    def suggest_lesson_limit(self):
+        cap = (self.server_settings.get("capacity") or {}).get("total_capacity", 0)
+        if not cap:
+            messagebox.showinfo("Limite sugerido", "Define primeiro a capacidade de pelo menos um fornecedor.", parent=self)
+            return
+        self.limit_var.set(str(int(cap * 0.75)))
+
     def save_daily_limit(self):
         if not self.require_admin_ui():
             return
@@ -2111,9 +2343,63 @@ class GoisWindow(tk.Tk):
 
         self.bg(work, done)
 
+    # ---------- cópia de segurança do estado do servidor ----------
+    @staticmethod
+    def state_snapshot(s):
+        cats = {}
+        for c, e in ((s.get("comparison") or {}).get("categories") or {}).items():
+            cats[c] = {k: e.get(k) for k in ("gois_score", "gemini_ref", "deepseek_ref", "benchmarks", "last_benchmark")}
+        tok = s.get("tokens") or {}
+        return {"saved": time.strftime("%Y-%m-%d %H:%M:%S"), "comparison": {"categories": cats},
+                "daily_token_limit": s.get("daily_token_limit", 0), "provider_capacity": s.get("provider_capacity") or {},
+                "tokens": {k: tok.get(k) for k in ("used_total", "used_today", "date", "by_provider")}}
+
+    @staticmethod
+    def state_regressed(now, old):
+        def bench(st):
+            return sum(int(e.get("benchmarks") or 0) for e in ((st.get("comparison") or {}).get("categories") or {}).values())
+        def used(st):
+            return int((st.get("tokens") or {}).get("used_total") or 0)
+        return bench(now) < bench(old) or used(now) < used(old)
+
+    def state_guard(self, s):
+        """Guarda uma cópia do estado do servidor; se o servidor tiver perdido dados, repõe-nos (sem apagar nada)."""
+        if not self.is_admin or getattr(self, "_restoring", False):
+            return
+        snap = self.state_snapshot(s)
+        old = read_json(STATE_BACKUP_FILE, None)
+        if old and self.state_regressed(snap, old):
+            if time.time() - getattr(self, "_restore_try", 0) < 120:
+                return
+            self._restore_try = time.time()
+            self._restoring = True
+
+            def done(res, err):
+                self._restoring = False
+                if err:
+                    self.flash(f"Não consegui repor o estado do servidor: {err}", THEME["danger"], 9000)
+                    return
+                self.flash("♻ O servidor tinha perdido dados: notas, tokens e definições repostos a partir da cópia local.",
+                           THEME["bot"], 10000)
+                self.apply_settings(res)
+
+            self.bg(lambda: self.api.call("POST", "/api/state/restore", old, timeout=60), done)
+            return                       # não substitui a cópia boa por um estado em regressão
+        write_json(STATE_BACKUP_FILE, snap)
+        day = time.strftime("%Y%m%d")
+        daily = STATE_BACKUP_FILE.parent / "backups" / f"state-{day}.json"
+        if not daily.exists():
+            write_json(daily, snap)
+            for old_f in sorted(daily.parent.glob("state-*.json"))[:-7]:   # guarda os últimos 7 dias
+                try:
+                    old_f.unlink()
+                except OSError:
+                    pass
+
     def apply_settings(self, s, cached=False):
         self.server_settings = s
         if not cached:
+            self.state_guard(s)
             write_json(COMP_CACHE_FILE, s)
             self.last_live = time.time()
             self.record_history()
@@ -2133,6 +2419,16 @@ class GoisWindow(tk.Tk):
         extra = "  ⛔ limite atingido — modo autónomo pausado" if tok.get("auto_paused_by_limit") or tok.get("limit_reached") else ""
         self.tokens_lbl.config(text=f"🔋 Tokens hoje: {used:,} / {lim:,}".replace(",", ".") + f"   ·   Total acumulado: {tok.get('used_total', 0):,}".replace(",", ".") + extra,
                                fg=THEME["warn"] if extra else THEME["muted"])
+        capd = s.get("capacity") or {}
+        if capd.get("providers"):
+            if not self._cap_loaded:
+                for n, v in self.cap_vars.items():
+                    v.set(str((capd["providers"].get(n) or {}).get("capacity", 0)))
+                self._cap_loaded = True
+            parts = [f"{n} {self.fmt_tok(r.get('used', 0))}/{self.fmt_tok(r['capacity'])}"
+                     for n, r in capd["providers"].items() if r.get("capacity")]
+            if parts:
+                self.tokens_lbl.config(text=self.tokens_lbl.cget("text") + "   ·   Por fornecedor: " + "  |  ".join(parts))
         if not self.limit_var.get().strip() or self.limit_var.get() == "0":
             self.limit_var.set(str(lim))
         cats = comp.get("categories", {})
@@ -2147,6 +2443,11 @@ class GoisWindow(tk.Tk):
         self.refresh_live_ui()
 
     def update_knowledge_ui(self):
+        n_new = len(self.kb) - int(self.cfg.get("last_train_lessons", 0) or 0)
+        if n_new >= 50 and not getattr(self, "_reminded", False):
+            self._reminded = True
+            self.flash(f"📚 {n_new} lições novas desde a última afinação — carrega em 🚀 Atualizar modelo (Colab).",
+                       THEME["warn"], ms=15000)
         sel = self.kb_tree.selection()
         self.kb_tree.delete(*self.kb_tree.get_children())
         self.kb_rows = list(reversed(self.kb))
@@ -2163,6 +2464,490 @@ class GoisWindow(tk.Tk):
             k = self.kb_rows[int(sel[0])]
             self.lesson_text.insert(tk.END, f"{k.get('title', '')}\n[{k.get('category', '')} · {k.get('teacher', '')} · {k.get('created', '')}]\n\n{k.get('content', '')}")
         self.lesson_text.config(state=tk.DISABLED)
+
+
+    # ----------------------------------------------------------------------- #
+    # Google Colab (afinação do modelo)
+    # ----------------------------------------------------------------------- #
+    def colab_url(self):
+        return str(self.cfg.get("colab_url") or "").strip()
+
+    def colab_url_problem(self):
+        url = self.colab_url()
+        if not url:
+            return "Falta o URL do notebook no Colab (⚙ Definições)."
+        if not url.startswith(COLAB_HOST):
+            return f"O URL tem de começar por {COLAB_HOST}"
+        return ""
+
+    def test_colab(self):
+        if not self.require_admin_ui():
+            return
+        problem = self.colab_url_problem()
+        self.flash("⏳ A testar o Colab e o dataset…", THEME["muted"])
+
+        def work():
+            return self.api.call("GET", "/api/dataset?count=1", timeout=80)
+
+        def done(res, err):
+            lines = ["✅ Link do Colab com formato válido" if not problem else f"❌ {problem}"]
+            if err:
+                lines.append(f"❌ Dataset no servidor: {err}")
+            else:
+                n = res.get("count", 0)
+                lines.append(f"✅ Dataset no servidor: {n} exemplos prontos ({res.get('skipped', 0)} lições ignoradas)")
+                if n < 50:
+                    lines.append("⚠ Poucos exemplos: com menos de ~50 o afinamento quase não muda o modelo.")
+            lines.append("\nNota: daqui não consigo ver a tua sessão do Colab. Confirma lá que o segredo "
+                         "GOIS_ADMIN_TOKEN existe (ícone da chave, na barra lateral).")
+            self.flash("", THEME["muted"])
+            messagebox.showinfo("Testar Colab", "\n".join(lines), parent=self)
+
+        self.bg(work, done)
+
+    def update_model_colab(self):
+        """Sincroniza as lições com o servidor e abre o notebook no Colab; só falta 'Executar tudo'."""
+        if not self.require_admin_ui():
+            return
+        problem = self.colab_url_problem()
+        if problem:
+            messagebox.showwarning("Colab", problem, parent=self)
+            self.open_settings()
+            return
+        self.flash("⏳ A sincronizar as lições com o servidor…", THEME["muted"])
+
+        def work():
+            server_kb = self.api.call("GET", "/api/knowledge")
+            ids = {k.get("id") for k in server_kb}
+            missing = [k for k in self.kb_cache if k.get("id") not in ids]
+            if missing:  # o Render perdeu lições (restart): repõe a partir da cópia local
+                self.api.call("POST", "/api/sync/import", {"knowledge": missing}, timeout=60)
+            return self.api.call("GET", "/api/dataset?count=1", timeout=80)
+
+        def done(res, err):
+            n = None
+            if err:
+                if not messagebox.askyesno("Colab", f"Não consegui preparar o dataset no servidor:\n{err}\n\nAbrir o Colab mesmo assim?", parent=self):
+                    self.flash("", THEME["muted"])
+                    return
+            else:
+                n = res.get("count", 0)
+            webbrowser.open(self.colab_url())
+            self.cfg["last_train_lessons"] = len(self.kb)
+            self.save_config()
+            msg = "🚀 Colab aberto — carrega em Ambiente de execução → Executar tudo (Ctrl+F9)."
+            self.flash((f"{n} exemplos prontos. " if n is not None else "") + msg, THEME["bot"], ms=12000)
+            if not self.cfg.get("colab_hint_seen"):
+                messagebox.showinfo(
+                    "Colab",
+                    "Primeira vez? No Colab:\n"
+                    "1. Barra lateral → 🔑 Segredos → cria GOIS_ADMIN_TOKEN com o teu ADMIN_TOKEN e liga o acesso ao notebook.\n"
+                    "2. Ambiente de execução → Executar tudo (Ctrl+F9).\n"
+                    "3. Aceita a ligação ao Google Drive quando pedir.\n\n"
+                    "No fim, o modelo (.gguf) fica na pasta gois_v1 do teu Google Drive.", parent=self)
+                self.cfg["colab_hint_seen"] = True
+                self.save_config()
+
+        self.bg(work, done)
+
+
+    # ======================================================================= #
+    # MODELO PRÓPRIO (LM Studio + túnel Cloudflare + servidor)
+    # ======================================================================= #
+    def build_local_tab(self):
+        c = self.cfg
+        self.v_model = tk.StringVar(value=c.get("lm_model", ""))
+        self.v_ctx = tk.StringVar(value=str(c.get("lm_ctx", 2048)))
+        self.v_models_dir = tk.StringVar(value=c.get("lm_models_dir") or default_models_dir())
+        self.v_watch_dir = tk.StringVar(value=c.get("watch_dir") or str(Path.home() / "Downloads"))
+        self.v_auto_start = tk.BooleanVar(value=bool(c.get("auto_start_local", False)))
+        self.v_auto_install = tk.BooleanVar(value=bool(c.get("auto_install_gguf", True)))
+
+        tk.Label(self.tab_local, text="🤖 Modelo próprio (LM Studio neste PC)", bg=THEME["bg"], fg=THEME["fg"],
+                 font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, padx=20, pady=(14, 2))
+        tk.Label(self.tab_local, bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W,
+                 text="▶ Ligar faz tudo: arranca o servidor do LM Studio, carrega o modelo, abre o túnel e diz ao servidor do chat onde está.\n"
+                      "Roteamento: quando entras como ADMIN, o chat usa SÓ o teu modelo (se este PC estiver desligado mostra «offline»).\n"
+                      "Quem usa o chat sem token (público) continua nos fornecedores e nunca chega ao teu PC.").pack(fill=tk.X, padx=20)
+
+        card = self.card(self.tab_local)
+        card.pack(fill=tk.X, padx=20, pady=10)
+        card.columnconfigure(1, weight=1)
+
+        def entry_row(r, label, var, browse=None, detect=None):
+            tk.Label(card, text=label, bg=card.cget("bg"), fg=THEME["muted"], font=("Segoe UI", 9)).grid(row=r, column=0, sticky="w", padx=12, pady=6)
+            e = tk.Entry(card, textvariable=var, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT)
+            e.grid(row=r, column=1, sticky="ew", padx=6, ipady=4)
+            e.bind("<FocusOut>", self.save_local_cfg)
+            if browse:
+                self.btn(card, "…", browse, padx=8, pady=2).grid(row=r, column=2, padx=(0, 4))
+            if detect:
+                self.btn(card, "🔎 Detetar", detect, padx=8, pady=2).grid(row=r, column=3, padx=(0, 12))
+
+        entry_row(0, "Modelo no LM Studio (chave)", self.v_model, detect=self.detect_model_key)
+        entry_row(1, "Contexto (tokens)", self.v_ctx)
+        entry_row(2, "Pasta de modelos do LM Studio", self.v_models_dir, browse=lambda: self.pick_dir(self.v_models_dir))
+        entry_row(3, "Pasta onde aparece o .gguf novo", self.v_watch_dir, browse=lambda: self.pick_dir(self.v_watch_dir))
+
+        def check(text, var):
+            return tk.Checkbutton(card, text=text, variable=var, command=self.save_local_cfg, bg=card.cget("bg"), fg=THEME["fg"],
+                                  selectcolor=THEME["code_bg"], activebackground=card.cget("bg"), activeforeground=THEME["fg"],
+                                  font=("Segoe UI", 9), anchor="w")
+        tk.Label(card, text="🔒 Admin → só o teu modelo   ·   🌐 Público → só fornecedores (Groq, Gemini, OpenRouter, Mistral)",
+                 bg=card.cget("bg"), fg=THEME["muted"], font=("Segoe UI", 9), anchor="w").grid(row=4, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        check("Ligar automaticamente ao abrir o painel", self.v_auto_start).grid(row=5, column=0, columnspan=4, sticky="w", padx=8)
+        check("Instalar automaticamente o .gguf novo (e recarregar o modelo)", self.v_auto_install).grid(row=6, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
+
+        bar = tk.Frame(self.tab_local, bg=THEME["bg"])
+        bar.pack(fill=tk.X, padx=20)
+        self.btn(bar, "▶ Ligar modelo próprio", self.start_local, THEME["accent"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.btn(bar, "⏹ Parar", self.stop_local).pack(side=tk.LEFT, padx=6)
+        self.btn(bar, "📥 Instalar .gguf agora", lambda: self.install_gguf_now(False)).pack(side=tk.LEFT, padx=6)
+        self.btn(bar, "🧪 Testar", self.test_local, THEME["accent_blue"]).pack(side=tk.LEFT, padx=6)
+
+        self.local_status_lbl = tk.Label(self.tab_local, text="", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI Semibold", 10),
+                                         anchor=tk.W, justify=tk.LEFT, wraplength=1100)
+        self.local_status_lbl.pack(fill=tk.X, padx=20, pady=(10, 4))
+        self.local_log_text = tk.Text(self.tab_local, height=14, bg=THEME["panel"], fg=THEME["muted"], font=("Consolas", 9), relief=tk.FLAT,
+                                      padx=8, pady=6, state=tk.DISABLED, wrap=tk.WORD)
+        self.local_log_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 14))
+        self.local_ui_restore()
+
+    def local_ui_restore(self):
+        try:
+            text, color = self.local_status_state
+            self.local_status_lbl.config(text=text, fg=THEME.get(color, THEME["muted"]))
+            self.local_log_text.config(state=tk.NORMAL)
+            self.local_log_text.delete("1.0", tk.END)
+            self.local_log_text.insert(tk.END, "\n".join(self.local_log_lines[-200:]))
+            self.local_log_text.see(tk.END)
+            self.local_log_text.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    def set_local_status(self, text, color="muted"):
+        self.local_status_state = (text, color)
+        try:
+            self.local_status_lbl.config(text=text, fg=THEME.get(color, THEME["muted"]))
+        except Exception:
+            pass
+
+    def local_log(self, line):
+        line = str(line).strip()
+        if not line:
+            return
+        self.local_log_lines.append(time.strftime("%H:%M:%S  ") + line)
+        self.local_log_lines = self.local_log_lines[-300:]
+        try:
+            self.local_log_text.config(state=tk.NORMAL)
+            self.local_log_text.insert(tk.END, self.local_log_lines[-1] + "\n")
+            self.local_log_text.see(tk.END)
+            self.local_log_text.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    def llog(self, line):
+        """Registo seguro a partir de threads."""
+        self.ui_q.put(lambda: self.local_log(line))
+
+    def save_local_cfg(self, *_):
+        try:
+            ctx = int(self.v_ctx.get().strip() or 2048)
+        except ValueError:
+            ctx = 2048
+        self.cfg.update(lm_model=self.v_model.get().strip(), lm_ctx=max(256, ctx), lm_models_dir=self.v_models_dir.get().strip(),
+                        watch_dir=self.v_watch_dir.get().strip(),
+                        auto_start_local=bool(self.v_auto_start.get()), auto_install_gguf=bool(self.v_auto_install.get()))
+        self.save_config()
+
+    def pick_dir(self, var):
+        d = filedialog.askdirectory(initialdir=var.get() or str(Path.home()), parent=self)
+        if d:
+            var.set(d)
+            self.save_local_cfg()
+
+    def detect_model_key(self):
+        """Procura em `lms ls --json` o modelo 'gois' mais recente e preenche a chave."""
+        def work():
+            lms = find_lms()
+            if not lms:
+                raise RuntimeError("Não encontrei o 'lms'. Abre o LM Studio pelo menos uma vez e tenta de novo.")
+            code, out = run_cmd([lms, "ls", "--json"], timeout=90)
+            if code != 0:
+                raise RuntimeError(out[-300:] or "O 'lms ls' falhou.")
+            return pick_model_key(out, "gois")
+
+        def done(key, err):
+            if err:
+                messagebox.showwarning("Modelo próprio", str(err), parent=self)
+            elif not key:
+                messagebox.showinfo("Modelo próprio", "Não encontrei nenhum modelo com «gois» no nome.\nConfirma a pasta de modelos do LM Studio.", parent=self)
+            else:
+                self.v_model.set(key)
+                self.save_local_cfg()
+                self.local_log(f"🔎 Modelo detetado: {key}")
+
+        self.bg(work, done)
+
+    # ---------------- túnel ----------------
+    def open_tunnel(self, cf):
+        if self.local_proc and self.local_proc.poll() is None and self.local_url:
+            return self.local_url
+        self.llog("▶ A abrir o túnel Cloudflare…")
+        proc = subprocess.Popen([cf, "tunnel", "--url", f"http://127.0.0.1:{LM_PORT}"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW)
+        found = queue.Queue()
+
+        def reader():
+            try:
+                for line in proc.stdout:  # continua a ler até ao fim para o pipe nunca encher
+                    u = extract_tunnel_url(line)
+                    if u and found.empty():
+                        found.put(u)
+            except Exception:
+                pass
+
+        threading.Thread(target=reader, daemon=True).start()
+        try:
+            url = found.get(timeout=60)
+        except queue.Empty:
+            proc.terminate()
+            raise RuntimeError("O túnel não devolveu um endereço em 60 s. Verifica a ligação à internet.")
+        self.local_proc, self.local_url = proc, url
+        return url
+
+    def stop_tunnel(self):
+        try:
+            if self.local_proc and self.local_proc.poll() is None:
+                self.local_proc.terminate()
+        except Exception:
+            pass
+
+    # ---------------- ligar / parar ----------------
+    def start_local(self, auto=False, only_tunnel=False):
+        if self.local_busy:
+            return
+        if not auto and not self.require_admin_ui():
+            return
+        self.save_local_cfg()
+        model_key, ctx = self.cfg.get("lm_model", ""), self.cfg.get("lm_ctx", 2048)
+        self.local_busy = True
+        self.set_local_status("⏳ A ligar o modelo próprio…", "warn")
+
+        def work():
+            lms = find_lms()
+            if not lms:
+                raise RuntimeError("Não encontrei o 'lms' (CLI do LM Studio). Abre o LM Studio pelo menos uma vez e tenta de novo.")
+            cf = find_cloudflared()
+            if not cf:
+                raise RuntimeError("Não encontrei o 'cloudflared'. Instala-o numa janela de comandos com:\n"
+                                   "winget install --id Cloudflare.cloudflared\n(ou descarrega-o em developers.cloudflare.com) e tenta de novo.")
+            key = model_key
+            if not only_tunnel:
+                self.llog("▶ A iniciar o servidor do LM Studio…")
+                code, out = run_cmd([lms, "server", "start"], timeout=120)
+                self.llog(out[-300:] or f"(código {code})")
+                if not key:
+                    code, out = run_cmd([lms, "ls", "--json"], timeout=90)
+                    key = pick_model_key(out, "gois")
+                    if key:
+                        self.ui_q.put(lambda k=key: (self.v_model.set(k), self.save_local_cfg()))
+                if not key:
+                    raise RuntimeError("Falta a chave do modelo. Carrega em 🔎 Detetar (ou escreve a chave que aparece em 'lms ls').")
+                self.llog(f"▶ A carregar «{key}» (contexto {ctx}, sem GPU). Pode demorar alguns minutos…")
+                run_cmd([lms, "unload", "--all"], timeout=60)
+                code, out = run_cmd([lms, "load", key, "--identifier", LOCAL_IDENTIFIER, "--context-length", str(ctx), "--gpu", "off"], timeout=900)
+                self.llog(out[-300:] or f"(código {code})")
+                if code != 0:
+                    raise RuntimeError("O LM Studio não conseguiu carregar o modelo:\n" + out[-300:])
+            url = self.open_tunnel(cf)
+            self.llog(f"🌐 Túnel: {url}")
+            self.api.call("POST", "/api/local/config", {"url": url + "/v1", "model": LOCAL_IDENTIFIER}, timeout=60)
+            return url
+
+        def done(url, err):
+            self.local_busy = False
+            if err:
+                self.set_local_status(f"🔴 {err}", "danger")
+                self.local_log(f"❌ {err}")
+                if not auto:
+                    messagebox.showerror("Modelo próprio", str(err), parent=self)
+                return
+            self.set_local_status(f"🟢 Online — o servidor do chat já está ligado ao teu modelo\n{url}", "bot")
+            self.schedule_local_keepalive()
+
+        self.bg(work, done)
+
+    def stop_local(self):
+        self.stop_tunnel()
+        self.local_url = ""
+        if self._local_after:
+            try:
+                self.after_cancel(self._local_after)
+            except Exception:
+                pass
+            self._local_after = None
+
+        def work():
+            lms = find_lms()
+            if lms:
+                run_cmd([lms, "server", "stop"], timeout=60)
+            try:
+                self.api.call("POST", "/api/local/config", {"url": ""}, timeout=30)
+            except Exception:
+                pass
+
+        self.set_local_status("⚪ Parado — o chat de admin mostra «offline»; o chat público continua nos fornecedores", "muted")
+        self.local_log("⏹ Parado.")
+        self.bg(work)
+
+    def schedule_local_keepalive(self):
+        if self._local_after:
+            try:
+                self.after_cancel(self._local_after)
+            except Exception:
+                pass
+        self._local_after = self.after(60_000, self.local_keepalive)
+
+    def local_keepalive(self):
+        """De 60 em 60 s: reenvia o URL ao servidor (o Render reinicia e esquece) e religa o túnel se tiver caído."""
+        self._local_after = None
+        if not self.local_url:
+            return
+        if not (self.local_proc and self.local_proc.poll() is None):
+            self.local_url = ""
+            self.set_local_status("🟠 O túnel caiu — a religar…", "warn")
+            self.local_log("🟠 O túnel caiu; a abrir outro.")
+            self.start_local(auto=True, only_tunnel=True)
+            return
+        url = self.local_url
+        self.bg(lambda: self.api.call("POST", "/api/local/config", {"url": url + "/v1", "model": LOCAL_IDENTIFIER}, timeout=30))
+        self.schedule_local_keepalive()
+
+    def auto_start_tick(self, tries):
+        if self.connected and self.is_admin:
+            self.start_local(auto=True)
+        elif tries < 12:
+            self.after(5000, lambda: self.auto_start_tick(tries + 1))
+
+    def test_local(self):
+        if not self.require_admin_ui():
+            return
+
+        def done(res, err):
+            if err:
+                messagebox.showerror("Testar modelo próprio", str(err), parent=self)
+                return
+            lines = [
+                ("✅" if res.get("url_set") else "❌") + " O servidor conhece o endereço do teu modelo",
+                ("✅" if res.get("online") else "❌") + " O servidor consegue falar com o LM Studio" + (f" ({res.get('error')})" if res.get("error") else ""),
+                f"Modelo: {res.get('model')}",
+                "Roteamento: admin → só o teu modelo · público → só fornecedores",
+            ]
+            if not res.get("url_set"):
+                lines.append("\nCarrega em ▶ Ligar modelo próprio.")
+            messagebox.showinfo("Testar modelo próprio", "\n".join(lines), parent=self)
+
+        self.bg(lambda: self.api.call("GET", "/api/local/status", timeout=40), done)
+
+    # ---------------- instalar .gguf novo ----------------
+    def local_watch_tick(self):
+        try:
+            if getattr(self, "v_auto_install", None) is not None and self.v_auto_install.get() and not self.local_busy:
+                self.install_gguf_now(True)
+        finally:
+            self.after(30_000, self.local_watch_tick)
+
+    def install_gguf_now(self, auto=False):
+        if self._installing:
+            return
+        self.save_local_cfg()
+        watch, mdir = self.v_watch_dir.get().strip(), self.v_models_dir.get().strip()
+        last_sig = self.cfg.get("last_gguf_sig", "")
+        self._installing = True
+
+        def work():
+            src = newest_gguf(watch)
+            if not src:
+                return None
+            sig = gguf_signature(src)
+            if auto and sig == last_sig:
+                return None
+            self.llog(f"📥 .gguf novo encontrado: {src.name} — a copiar para o LM Studio…")
+            dest = install_gguf(src, mdir)
+            key = ""
+            lms = find_lms()
+            if lms:
+                code, out = run_cmd([lms, "ls", "--json"], timeout=90)
+                key = pick_model_key(out, src.stem)
+            return sig, str(dest), key
+
+        def done(res, err):
+            self._installing = False
+            if err:
+                self.local_log(f"❌ Instalação do .gguf: {err}")
+                if not auto:
+                    messagebox.showerror("Instalar .gguf", str(err), parent=self)
+                return
+            if res is None:
+                if not auto:
+                    messagebox.showinfo("Instalar .gguf", f"Não encontrei nenhum ficheiro gois-v1-*.gguf novo em:\n{watch}\n\n"
+                                        "(Ficheiros com menos de 20 s são ignorados porque ainda podem estar a descarregar.)", parent=self)
+                return
+            sig, dest, key = res
+            self.cfg["last_gguf_sig"] = sig
+            self.local_log(f"✅ Instalado: {dest}")
+            if key:
+                self.cfg["lm_model"] = key
+                self.v_model.set(key)
+                self.local_log(f"🔎 Chave do modelo novo: {key}")
+            else:
+                self.local_log("⚠ O LM Studio ainda não indexou o ficheiro. Espera uns segundos e carrega em 🔎 Detetar.")
+            self.save_config()
+            self.flash("📥 Modelo novo instalado no LM Studio.", THEME["bot"], ms=10000)
+            if key and self.local_url and not self.local_busy:
+                self.local_log("🔄 A recarregar o modelo novo…")
+                self.start_local(auto=True)
+
+        self.bg(work, done)
+
+    def export_dataset(self):
+        """Exporta as lições (atualizadas do servidor + cópia local) para um dataset JSONL de afinação."""
+        self.flash("⏳ A juntar as lições mais recentes…", THEME["muted"])
+
+        def work():
+            merged = {k["id"]: k for k in self.kb_cache if k.get("id")}
+            if self.is_admin:
+                try:  # lições mais recentes do servidor; se estiver offline, usa a cópia local
+                    for k in self.api.call("GET", "/api/knowledge"):
+                        if k.get("id"):
+                            merged[k["id"]] = k
+                except Exception:
+                    pass
+            return sorted(merged.values(), key=lambda k: k.get("created", ""))
+
+        def done(res, err):
+            rows, skipped = build_dataset_rows(res or [])
+            if err or not rows:
+                messagebox.showinfo("Exportar dataset", "Ainda não há lições suficientes para exportar.\n"
+                                    "(Cada lição precisa de título e de pelo menos 200 caracteres.)")
+                return
+            path = filedialog.asksaveasfilename(initialfile="gois_dataset.jsonl", defaultextension=".jsonl",
+                                                filetypes=[("JSON Lines", "*.jsonl")])
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
+                    for r in rows:
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            except Exception as e:
+                messagebox.showerror("Exportar dataset", f"Não foi possível gravar o ficheiro:\n{e}")
+                return
+            self.flash(f"📦 {len(rows)} exemplos exportados → {path}", THEME["bot"], ms=9000)
+            messagebox.showinfo("Exportar dataset", f"{len(rows)} exemplos exportados.\n"
+                                f"{skipped} lição(ões) ignorada(s) (curtas ou repetidas).\n\n{path}")
+
+        self.bg(work, done)
 
 
 if __name__ == "__main__":
