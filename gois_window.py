@@ -145,9 +145,30 @@ def series_color(key: str) -> str:
 
 # --- Modelos comparados ------------------------------------------------------------------------------------- #
 # (chave, nome, campo guardado no servidor). O gois.v1 é o teu modelo; Mistral e Groq são as referências.
-COMPARE_MODELS = (("gois", "gois.v1", "gois_score"), ("mistral", "Mistral", "mistral_ref"), ("groq", "Groq", "groq_ref"))
+# Três "lugares" na comparação: o teu modelo e UM modelo escolhido de cada fornecedor (Mistral, Groq). O nome mostrado é o do
+# modelo escolhido; as notas vêm do servidor (e["models"]["Fornecedor|modelo"]). COMPARE_MODELS e MODEL_NAME mudam NO SÍTIO
+# quando escolhes outro modelo, por isso tudo o que os usa (tabela, gráficos, totais) acompanha a escolha.
+COMPARE_MODELS = [("gois", "gois.v1", "gois_score"), ("mistral", "Mistral", "mistral_ref"), ("groq", "Groq", "groq_ref")]
 MODEL_FIELD = {k: f for k, _n, f in COMPARE_MODELS}
 MODEL_NAME = {k: n for k, n, _f in COMPARE_MODELS}
+MODEL_PROVIDER = {"mistral": "Mistral", "groq": "Groq"}
+
+
+def mkey(provider, model):
+    return f"{provider}|{model}"
+
+
+def short(txt, n=20):
+    txt = str(txt)
+    return txt if len(txt) <= n else txt[:n - 1] + "…"
+
+
+def set_model_labels(sel):
+    for i, (slot, _n, field) in enumerate(list(COMPARE_MODELS)):
+        prov = MODEL_PROVIDER.get(slot)
+        name = "gois.v1" if not prov else (sel.get(prov) or prov)
+        COMPARE_MODELS[i] = (slot, name, field)
+        MODEL_NAME[slot] = name
 # Notas antigas (até à v2.3): continuam guardadas no servidor e entram no CSV, mas já não são comparadas.
 LEGACY_FIELDS = (("Gemini (arquivo)", "gemini_ref"), ("DeepSeek (arquivo)", "deepseek_ref"))
 
@@ -580,7 +601,11 @@ class GoisWindow(tk.Tk):
         # Modelo em foco na Comparação: só muda o destaque e os Δ; os dados de todos os modelos ficam sempre guardados.
         self.focus_model = fm if fm in MODEL_FIELD else "gois"
         hist = read_json(HISTORY_FILE, [])
-        self.history = hist if isinstance(hist, list) else []
+        self.history = hist if isinstance(hist, list) else []      # (antigo, já não usado no gráfico: vem do servidor)
+        sm = self.cfg.get("sel_models")
+        self.sel_models = {p: (sm.get(p) if isinstance(sm, dict) else None) for p in MODEL_PROVIDER.values()}
+        self.provider_models = {}          # lista real de modelos por fornecedor (GET /api/provider-models)
+        set_model_labels(self.sel_models)
         self.kb = []
         self.class_busy = False
         self.class_kind = None            # 'learn' | 'benchmark' enquanto este painel executa algo
@@ -734,7 +759,9 @@ class GoisWindow(tk.Tk):
         top.pack(fill=tk.X, padx=12, pady=(8, 0))
         if color:
             tk.Label(top, text="●", fg=color, bg=THEME["panel"], font=("Segoe UI", 10)).pack(side=tk.LEFT)
-        tk.Label(top, text=title, fg=THEME["muted"], bg=THEME["panel"], font=("Segoe UI Semibold", 9)).pack(side=tk.LEFT, padx=(4 if color else 0, 0))
+        tl = tk.Label(top, text=title, fg=THEME["muted"], bg=THEME["panel"], font=("Segoe UI Semibold", 9))
+        tl.pack(side=tk.LEFT, padx=(4 if color else 0, 0))
+        self.kpi_title[key] = tl
         val = tk.Label(f, text="—", fg=color or THEME["fg"], bg=THEME["panel"], font=("Segoe UI Semibold", 22 if big else 14))
         val.pack(anchor=tk.W, padx=12)
         sub = tk.Label(f, text="", fg=THEME["muted"], bg=THEME["panel"], font=("Segoe UI", 8))
@@ -751,6 +778,7 @@ class GoisWindow(tk.Tk):
     def build_ui(self):
         self.kpi = {}
         self.kpi_status = {}
+        self.kpi_title = {}
         self.kpi_frames = {}
         self._kpi_order = None
         self.lamps = []
@@ -1709,8 +1737,43 @@ class GoisWindow(tk.Tk):
     # ======================================================================= #
     MODELS = COMPARE_MODELS
 
-    def cat_data(self):
+    def raw_cats(self):
         return (self.server_settings.get("comparison") or {}).get("categories") or {}
+
+    def cat_data(self):
+        """Categorias com as notas dos modelos ESCOLHIDOS (1 do Mistral, 1 do Groq) nos campos de cada lugar.
+        Os dados dos outros modelos continuam no servidor a evoluir e aparecem assim que os escolheres."""
+        out = {}
+        for c, e in self.raw_cats().items():
+            d = dict(e)
+            mods = e.get("models") or {}
+            for slot, prov in MODEL_PROVIDER.items():
+                sel = self.sel_models.get(prov)
+                m = mods.get(mkey(prov, sel)) if sel else None
+                m = m if isinstance(m, dict) else {}
+                d[MODEL_FIELD[slot]] = m.get("score")
+                d[slot + "_model"], d[slot + "_n"], d[slot + "_at"] = sel, m.get("n"), m.get("at")
+            out[c] = d
+        return out
+
+    def init_selection(self):
+        """Primeira vez (ou modelo que já não existe): escolhe o modelo com mais medições, senão o primeiro em medição."""
+        comp = self.server_settings.get("comparison") or {}
+        summ, tracked = comp.get("models_summary") or {}, self.server_settings.get("tracked_models") or {}
+        changed = False
+        for prov in MODEL_PROVIDER.values():
+            cur = self.sel_models.get(prov)
+            if cur and (mkey(prov, cur) in summ or cur in (tracked.get(prov) or [])):
+                continue
+            mine = sorted(((v.get("n", 0), k.split("|", 1)[1]) for k, v in summ.items() if k.startswith(prov + "|")), reverse=True)
+            pick = mine[0][1] if mine else ((tracked.get(prov) or [None])[0])
+            if pick and pick != cur:
+                self.sel_models[prov] = pick
+                changed = True
+        if changed:
+            self.cfg["sel_models"] = dict(self.sel_models)
+            self.save_config()
+        set_model_labels(self.sel_models)
 
     def totals(self):
         return model_totals(self.cat_data())
@@ -1743,6 +1806,102 @@ class GoisWindow(tk.Tk):
         self.cfg["focus_model"] = key
         self.save_config()
         self.update_comparison_ui()
+
+    # ---- escolha do modelo de cada fornecedor ----
+    def on_pill(self, key, ev):
+        self.set_focus(key)
+        if key in MODEL_PROVIDER:
+            self.open_model_menu(MODEL_PROVIDER[key], ev.widget)
+
+    def provider_rows(self, prov):
+        """[(id, tracked, avg, n, at)] — da lista real do fornecedor (se já vier) + tudo o que está em medição / já medido."""
+        comp = self.server_settings.get("comparison") or {}
+        summ = comp.get("models_summary") or {}
+        tracked = (self.server_settings.get("tracked_models") or {}).get(prov) or []
+        info = self.provider_models.get(prov) or {}
+        ids = {m["id"] for m in info.get("models", [])} | set(tracked) | {k.split("|", 1)[1] for k in summ if k.startswith(prov + "|")}
+        rows = []
+        for m in ids:
+            v = summ.get(mkey(prov, m)) or {}
+            rows.append((m, m in tracked, v.get("avg"), v.get("n", 0), v.get("at") or ""))
+        return sorted(rows, key=lambda r: (not r[1], r[2] is None, -(r[2] or 0), r[0]))
+
+    def open_model_menu(self, prov, widget):
+        self.fetch_provider_models(quiet=True)               # aquece a lista real para a próxima vez
+        menu = tk.Menu(self, tearoff=0, bg=THEME["panel"], fg=THEME["fg"], activebackground=THEME["accent"], activeforeground="#ffffff")
+        info = self.provider_models.get(prov) or {}
+        menu.add_command(label=f"Modelos do {prov} — escolhe 1 para comparar com o gois.v1"
+                               + ("" if info.get("live") else "  (lista ainda não carregada: usa ⟳)"), state=tk.DISABLED)
+        menu.add_separator()
+        cur = self.sel_models.get(prov)
+        rows = self.provider_rows(prov)
+        for m, tr, avg, n, at in rows:
+            if avg is not None:
+                txt = f"{m}    {avg:.1f} %  ·  {n} medições  ·  há {self.age_txt(at)}"
+            elif tr:
+                txt = f"{m}    a medir — ainda sem notas (corre um benchmark)"
+            else:
+                txt = f"{m}    não medido (passa a ser medido ao escolher)"
+            menu.add_radiobutton(label=("✔ " if m == cur else "    ") + txt, command=lambda mm=m: self.select_model(prov, mm))
+        stoppable = [r[0] for r in rows if r[1] and r[0] != cur]
+        if stoppable and len((self.server_settings.get("tracked_models") or {}).get(prov) or []) > 1:
+            menu.add_separator()
+            sub = tk.Menu(menu, tearoff=0, bg=THEME["panel"], fg=THEME["fg"])
+            for m in stoppable:
+                sub.add_command(label=m, command=lambda mm=m: self.track_model(prov, mm, False))
+            menu.add_cascade(label="Parar de medir (os dados ficam guardados) ▸", menu=sub)
+        menu.add_separator()
+        menu.add_command(label=f"⟳ Atualizar a lista real de modelos do {prov}", command=lambda: self.fetch_provider_models(refresh=True))
+        try:
+            menu.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def fetch_provider_models(self, refresh=False, quiet=False):
+        if not (self.connected and self.is_admin):
+            return
+
+        def done(res, err):
+            if err or not isinstance(res, dict):
+                if not quiet:
+                    self.flash(f"Não consegui obter a lista de modelos: {err}", THEME["danger"], 9000)
+                return
+            self.provider_models = res
+            if not quiet:
+                self.flash("✔ Lista real de modelos atualizada.", THEME["bot"], 5000)
+
+        self.bg(lambda: self.api.call("GET", "/api/provider-models" + ("?refresh=1" if refresh else ""), timeout=60), done)
+
+    def select_model(self, prov, model):
+        """Escolhe o modelo do fornecedor que é comparado com o gois.v1. Não apaga nada: os outros continuam a ser medidos."""
+        self.sel_models[prov] = model
+        self.cfg["sel_models"] = dict(self.sel_models)
+        self.save_config()
+        set_model_labels(self.sel_models)
+        self.update_comparison_ui()
+        self.update_kpis()
+        tracked = (self.server_settings.get("tracked_models") or {}).get(prov) or []
+        has_data = any(mkey(prov, model) == k for k in ((self.server_settings.get("comparison") or {}).get("models_summary") or {}))
+        if model not in tracked:
+            self.track_model(prov, model, True)
+        elif not has_data:
+            self.flash(f"{model} ainda não tem notas: corre ⚔ Benchmark para o medir.", THEME["warn"], 9000)
+
+    def track_model(self, prov, model, on):
+        def done(res, err):
+            if err:
+                self.flash(f"❌ {err}", THEME["danger"], 12000)
+                if on and self.sel_models.get(prov) == model:       # não deixes escolhido um modelo que não é medido
+                    self.sel_models[prov] = None
+                    self.init_selection()
+                    self.update_comparison_ui()
+                    self.update_kpis()
+                return
+            self.apply_settings(res)
+            self.flash((f"✔ {model} passa a ser medido em cada benchmark (corre ⚔ para ter as primeiras notas)." if on
+                        else f"{model} deixou de ser medido (dados guardados)."), THEME["bot"], 9000)
+
+        self.bg(lambda: self.api.call("POST", "/api/models/track", {"provider": prov, "model": model, "tracked": on}, timeout=40), done)
 
     def reorder_model_cards(self):
         """Os cartões dos totais (topo) ficam sempre do mais forte para o mais fraco; só se mexem quando a ordem muda."""
@@ -1785,7 +1944,7 @@ class GoisWindow(tk.Tk):
             b = tk.Label(ctl, text=f"● {name}", fg=series_color(key), bg=THEME["panel"], font=("Segoe UI Semibold", 9),
                          padx=10, pady=3, cursor="hand2", highlightthickness=2, highlightbackground=THEME["border"])
             b.pack(side=tk.LEFT, padx=3)
-            b.bind("<Button-1>", lambda _e, k=key: self.set_focus(k))
+            b.bind("<Button-1>", lambda e, k=key: self.on_pill(k, e))
             self.pick_btns[key] = b
         cb = ttk.Combobox(ctl, textvariable=self.live_s, values=["5", "10", "30", "60"], width=4, state="readonly")
         cb.pack(side=tk.RIGHT)
@@ -1794,9 +1953,10 @@ class GoisWindow(tk.Tk):
         tk.Checkbutton(ctl, text="🔁 benchmark contínuo (gasta tokens)", variable=self.auto_bench, bg=THEME["bg"], fg=THEME["muted"],
                        selectcolor=THEME["code_bg"], activebackground=THEME["bg"], activeforeground=THEME["fg"],
                        font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=8)
-        tk.Label(t, text="Notas 0–100 dadas por um modelo-juiz (LLM) a respostas anónimas à mesma pergunta; Mistral e Groq são chamados "
-                         "de verdade pelo servidor. São indicativas, não um teste oficial. O modelo em foco só muda o destaque e os Δ: "
-                         "os dados dos outros nunca se perdem.", bg=THEME["bg"], fg=THEME["muted"],
+        tk.Label(t, text="Notas 0–100 dadas por um modelo-juiz (LLM) a respostas anónimas à mesma pergunta; cada modelo "
+                         "é chamado de verdade pelo servidor. Clica em Mistral ▾ ou Groq ▾ para escolher QUAL dos modelos do fornecedor "
+                         "comparas com o gois.v1: todos os modelos em medição continuam a ser avaliados em cada benchmark, por isso "
+                         "ao trocar vês a evolução real deles. São notas indicativas, não um teste oficial.", bg=THEME["bg"], fg=THEME["muted"],
                  font=("Segoe UI", 8), anchor=tk.W, justify=tk.LEFT, wraplength=1200).pack(fill=tk.X, padx=18, pady=(2, 0))
 
         pw = tk.PanedWindow(t, orient=tk.VERTICAL, bg=THEME["border"], sashwidth=4)
@@ -1807,15 +1967,15 @@ class GoisWindow(tk.Tk):
         left.pack(side=tk.LEFT, fill=tk.Y)
         c0 = self.card(left)
         c0.pack(fill=tk.X, pady=(0, 8))
-        self.cv_rank = tk.Canvas(c0, width=400, height=138, bg=THEME["panel"], highlightthickness=0, cursor="hand2")
+        self.cv_rank = tk.Canvas(c0, width=470, height=138, bg=THEME["panel"], highlightthickness=0, cursor="hand2")
         self.cv_rank.pack(fill=tk.X)
         c1 = self.card(left)
         c1.pack(fill=tk.X, pady=(0, 8))
-        self.cv_overall = tk.Canvas(c1, width=400, height=160, bg=THEME["panel"], highlightthickness=0)
+        self.cv_overall = tk.Canvas(c1, width=470, height=160, bg=THEME["panel"], highlightthickness=0)
         self.cv_overall.pack(fill=tk.X)
         c2 = self.card(left)
         c2.pack(fill=tk.BOTH, expand=True)
-        self.cv_trend = tk.Canvas(c2, width=400, height=150, bg=THEME["panel"], highlightthickness=0)
+        self.cv_trend = tk.Canvas(c2, width=470, height=150, bg=THEME["panel"], highlightthickness=0)
         self.cv_trend.pack(fill=tk.BOTH, expand=True)
         c3 = self.card(upper)
         c3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
@@ -1838,7 +1998,7 @@ class GoisWindow(tk.Tk):
         tf = tk.Frame(pw, bg=THEME["panel"])
         pw.add(tf, minsize=140)
         cols = ("n", "cat", "gois", "mis", "grq", "dg", "dd", "les", "bm", "last")
-        heads = (("n", 36, "#"), ("cat", 280, "Categoria"), ("gois", 80, "gois.v1"), ("mis", 80, "Mistral"), ("grq", 80, "Groq"),
+        heads = (("n", 36, "#"), ("cat", 280, "Categoria"), ("gois", 90, "gois.v1"), ("mis", 150, "Mistral"), ("grq", 150, "Groq"),
                  ("dg", 150, "Δ vs …"), ("dd", 150, "Δ vs …"), ("les", 60, "Lições"), ("bm", 85, "Benchmarks"), ("last", 130, "Último"))
         self.comp_tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="browse")
         for c, w, txt in heads:
@@ -1898,6 +2058,8 @@ class GoisWindow(tk.Tk):
         for key, b in getattr(self, "pick_btns", {}).items():
             try:
                 on = key == focus
+                prov = MODEL_PROVIDER.get(key)
+                b.config(text=f"● {prov} ▾  {short(MODEL_NAME[key], 28)}" if prov else f"● {MODEL_NAME[key]}")
                 b.config(bg=THEME["panel_alt"] if on else THEME["panel"],
                          highlightbackground=series_color(key) if on else THEME["border"])
             except tk.TclError:
@@ -1926,16 +2088,20 @@ class GoisWindow(tk.Tk):
                 lines.append(f"      vs {other}: ainda sem categorias em comum")
         lines.append("")
         cc = len(common_categories(cats))
-        lines.append(f"Dados reais de todos os modelos (independente do foco) · totais só nas {cc} categorias medidas nos três:")
+        lines.append(f"Comparação real entre o gois.v1 e os modelos escolhidos (totais só nas {cc} categorias medidas nos três):")
         mc = measured_counts(cats)
         for k, n, field in self.MODELS:
             ents = [e for e in cats.values() if _score(e, field) is not None]
-            used = sorted({str(e.get(f"{k}_model")) for e in ents if e.get(f"{k}_model")})
             stamps = [str(e.get(f"{k}_at") or "") for e in ents if e.get(f"{k}_at")]
             age = self.age_txt(max(stamps)) if stamps else "—"
             samples = sum(int(e.get(f"{k}_n") or 0) for e in ents)
-            lines.append(f"      {n}: {mc[k]}/{len(DEFAULT_CATEGORIES)} categorias · {samples} medições · última há {age}"
-                         + (f" · modelo real: {', '.join(used)}" if used else ""))
+            lines.append(f"      {n}: {mc[k]}/{len(DEFAULT_CATEGORIES)} categorias · {samples} medições · última há {age}")
+        summ = (self.server_settings.get("comparison") or {}).get("models_summary") or {}
+        for prov in MODEL_PROVIDER.values():
+            others = sorted(((k.split("|", 1)[1], v) for k, v in summ.items() if k.startswith(prov + "|")
+                             and k.split("|", 1)[1] != self.sel_models.get(prov)), key=lambda x: -x[1].get("avg", 0))
+            if others:
+                lines.append(f"      {prov}, em medição por detrás: " + " · ".join(f"{m} {v['avg']:.1f}% ({v['n']})" for m, v in others))
         try:
             lbl.config(text="\n".join(lines))
         except tk.TclError:
@@ -1980,7 +2146,7 @@ class GoisWindow(tk.Tk):
         self._rank_rows = []
         cv.create_text(14, 14, text="★ Ranking ao vivo · do mais forte ao mais fraco", anchor="w", fill=THEME["fg"],
                        font=("Segoe UI Semibold", 10))
-        top, row_h, bar_l = 30, 30, 118
+        top, row_h, bar_l = 30, 30, 214
         bar_r = max(bar_l + 40, w - 150)
         lead = rows[0][2]
         for i, (key, name, val, n) in enumerate(rows):
@@ -1992,7 +2158,7 @@ class GoisWindow(tk.Tk):
                 cv.create_rectangle(6, y0 + 1, w - 6, y0 + row_h - 2, fill=THEME["panel_alt"], outline=col, width=2)
             cv.create_text(16, yc, text=f"#{i + 1}" if val is not None else "·", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 10))
             cv.create_oval(46, yc - 5, 56, yc + 5, fill=col, outline="")
-            cv.create_text(64, yc, text=name, anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
+            cv.create_text(64, yc, text=short(name, 20), anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
             cv.create_rectangle(bar_l, yc - 5, bar_r, yc + 5, fill=THEME["border"], outline="")
             if val is None:
                 cv.create_text(bar_r + 8, yc, text="—", anchor="w", fill=THEME["muted"], font=("Segoe UI", 9))
@@ -2043,7 +2209,7 @@ class GoisWindow(tk.Tk):
             else:
                 cv.create_rectangle(cx - bw / 2, bottom - 2, cx + bw / 2, bottom, fill=THEME["border"], outline="")
                 cv.create_text(cx, bottom - 12, text="—", fill=THEME["muted"])
-            cv.create_text(cx, bottom + 13, text=name, fill=THEME["fg"] if key == focus else THEME["muted"],
+            cv.create_text(cx, bottom + 13, text=short(name, 16), fill=THEME["fg"] if key == focus else THEME["muted"],
                            font=("Segoe UI Semibold" if key == focus else "Segoe UI", 9))
 
     def draw_trend(self):
@@ -2051,10 +2217,10 @@ class GoisWindow(tk.Tk):
         if cv is None or not self._cv_ready(cv):
             return
         w, h = cv.winfo_width(), cv.winfo_height()
-        cv.create_text(14, 14, text="Evolução dos totais (histórico local)", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 10))
-        pts = self.history[-150:]
+        cv.create_text(14, 14, text="Evolução real (média de cada modelo nas suas categorias medidas)", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 10))
+        pts = self.trend_points()[-150:]
         if len(pts) < 2:
-            cv.create_text(w / 2, h / 2, text="A recolher histórico…\ncada alteração dos totais fica guardada aqui.",
+            cv.create_text(w / 2, h / 2, text="A recolher histórico…\ncada benchmark fica guardado no servidor.",
                            fill=THEME["muted"], font=("Segoe UI", 9), justify=tk.CENTER)
             return
         keys = [k for k, _n, _f in self.MODELS]
@@ -2153,7 +2319,7 @@ class GoisWindow(tk.Tk):
     def run_benchmark(self, cat, then=None):
         if self.class_busy:
             return False
-        self.set_class_busy(True, f"⚔️ Benchmark em [{cat}] (gois.v1 vs Mistral vs Groq, pode demorar alguns minutos)…", kind="benchmark", cat=cat)
+        self.set_class_busy(True, f"⚔️ Benchmark em [{cat}] (gois.v1 vs todos os modelos Mistral/Groq em medição, pode demorar alguns minutos)…", kind="benchmark", cat=cat)
 
         def done(res, err):
             self.set_class_busy(False)
@@ -2165,11 +2331,12 @@ class GoisWindow(tk.Tk):
                     self.class_log("⛔ Série de benchmarks parada no primeiro erro (para não gastar tokens).")
                 return
             b = res.get("benchmark", {})
-            self.class_log(f"🏆 [{cat}] em {b.get('elapsed_s', '?')}s: gois.v1 {self.fnum(b.get('gois_score'))}% · "
-                           f"Mistral {self.fnum(b.get('mistral_ref'))}% · Groq {self.fnum(b.get('groq_ref'))}%")
+            sc = b.get("scores") or {}
+            self.class_log(f"🏆 [{cat}] em {b.get('elapsed_s', '?')}s (juiz: {b.get('judge') or '?'}): gois.v1 {self.fnum(sc.get('gois'))}% · "
+                           + " · ".join(f"{k.replace('|', '/')} {self.fnum(v)}%" for k, v in sc.items() if k != "gois"))
             if b.get("missing"):
                 self.class_log("⚠ Sem resposta neste benchmark (nota antiga mantida, não renovada): "
-                               + ", ".join(MODEL_NAME.get(m, m) for m in b["missing"]))
+                               + ", ".join(m.replace("|", "/") for m in b["missing"]))
             if isinstance(res.get("settings"), dict):
                 self.apply_settings(res["settings"])
             if then:
@@ -2267,7 +2434,7 @@ class GoisWindow(tk.Tk):
         self.run_benchmark(min(DEFAULT_CATEGORIES, key=key))
 
     def export_comparison_csv(self):
-        path = filedialog.asksaveasfilename(initialfile="comparacao_gois_mistral_groq.csv", defaultextension=".csv",
+        path = filedialog.asksaveasfilename(initialfile="comparacao_gois_modelos.csv", defaultextension=".csv",
                                             filetypes=[("CSV", "*.csv")])
         if not path:
             return
@@ -2292,6 +2459,11 @@ class GoisWindow(tk.Tk):
             tot = self.totals()
             wr.writerow(["TOTAL GERAL"] + [tot[k][0] for k, _n, _f in self.MODELS] + [""] * (len(pairs) + 3)
                         + [legacy_avg(fld) for _l, fld in LEGACY_FIELDS])
+            wr.writerow([])
+            wr.writerow(["TODOS OS MODELOS EM MEDIÇÃO (escolhidos ou não)", "Fornecedor", "Média", "Categorias", "Medições", "Última"])
+            for key, v in sorted(((self.server_settings.get("comparison") or {}).get("models_summary") or {}).items()):
+                prov, _, model = key.partition("|")
+                wr.writerow([model, prov, v.get("avg"), v.get("cats"), v.get("n"), v.get("at")])
             wr.writerow([])
             wr.writerow(["RANKING (do mais forte ao mais fraco)", "Posição", "Total geral", "Categorias medidas"])
             for i, (_k, name, val, n) in enumerate(self.ranking(), 1):
@@ -2333,7 +2505,20 @@ class GoisWindow(tk.Tk):
         self.refresh_live_ui()
         self.after(1000, self.clock_tick)
 
+    def trend_points(self):
+        """Evolução REAL guardada no servidor (um ponto por benchmark) para o gois.v1 e para os modelos escolhidos."""
+        out = []
+        for h in (self.server_settings.get("comparison") or {}).get("history") or []:
+            if not isinstance(h, dict) or not h.get("t"):
+                continue
+            ms = h.get("models") or {}
+            out.append({"t": h["t"], "gois": h.get("gois"),
+                        "mistral": ms.get(mkey("Mistral", self.sel_models.get("Mistral"))),
+                        "groq": ms.get(mkey("Groq", self.sel_models.get("Groq")))})
+        return out
+
     def record_history(self):
+        return          # substituído pelo histórico do servidor (comparison.history): inclui todos os modelos e a app fechada
         tot = self.totals()
         snap = {"t": time.time(), **{k: tot[k][0] for k in tot}}
         if all(snap[k] is None for k in tot):
@@ -2381,11 +2566,15 @@ class GoisWindow(tk.Tk):
                 self.kpi[k][0].config(text="—" if v is None else f"{v:.1f} %")
                 self.kpi[k][1].config(text=(f"#{pos[k]} · " if v is not None else "") + f"{mc[k]}/{nc} medidas · base {n}")
             self.reorder_model_cards()
-            pm, pq = comp.get("parity_vs_mistral"), comp.get("parity_vs_groq")
-            self.kpi["par_mis"][0].config(text=f"{pm} %" if pm else "—")
-            self.kpi["par_mis"][1].config(text="gois.v1 ÷ Mistral")
-            self.kpi["par_grq"][0].config(text=f"{pq} %" if pq else "—")
-            self.kpi["par_grq"][1].config(text="gois.v1 ÷ Groq")
+            pbm = comp.get("parity_by_model") or {}
+            for slot, card in (("mistral", "par_mis"), ("groq", "par_grq")):
+                prov = MODEL_PROVIDER[slot]
+                pv = pbm.get(mkey(prov, self.sel_models.get(prov)))
+                self.kpi[card][0].config(text=f"{pv} %" if pv else "—")
+                self.kpi[card][1].config(text=f"gois.v1 ÷ {short(MODEL_NAME[slot], 24)}")
+                self.kpi_title[card].config(text=f"Paridade vs {short(MODEL_NAME[slot], 24)}")
+            for k, n, _f in self.MODELS:
+                self.kpi_title[k].config(text=f"{short(n, 24)} · total geral")
             self.kpi["lessons"][0].config(text=str(comp.get("lessons_total", len(self.kb))))
             self.kpi["lessons"][1].config(text="na Sala de Aula")
             self.kpi["skills"][0].config(text=str(len(self.all_skills())))
@@ -2922,10 +3111,11 @@ class GoisWindow(tk.Tk):
     def state_snapshot(s):
         cats = {}
         for c, e in ((s.get("comparison") or {}).get("categories") or {}).items():
-            cats[c] = {k: e.get(k) for k in ("gois_score", "mistral_ref", "groq_ref", "gemini_ref", "deepseek_ref", "benchmarks", "last_benchmark",
-                                                  *[f"{m}_{x}" for m in ("gois", "mistral", "groq") for x in ("last", "n", "at", "model")])}
+            cats[c] = {k: e.get(k) for k in ("gois_score", "mistral_ref", "groq_ref", "gemini_ref", "deepseek_ref", "benchmarks", "last_benchmark", "models")}
         tok = s.get("tokens") or {}
-        return {"saved": time.strftime("%Y-%m-%d %H:%M:%S"), "comparison": {"categories": cats},
+        return {"saved": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "comparison": {"categories": cats, "history": (s.get("comparison") or {}).get("history") or []},
+                "tracked_models": s.get("tracked_models") or {},
                 "daily_token_limit": s.get("daily_token_limit", 0), "provider_capacity": s.get("provider_capacity") or {},
                 "tokens": {k: tok.get(k) for k in ("used_total", "used_today", "date", "by_provider")}}
 
@@ -2986,7 +3176,7 @@ class GoisWindow(tk.Tk):
         if not cached:
             provs = ", ".join(s.get("providers_with_key", [])) or "NENHUM (configura chaves no Render)"
             self.class_status.config(
-                text=f"Online · gois.v1 {comp.get('overall', 0)}% (Paridade Mistral {comp.get('parity_vs_mistral', 0)}% · Groq {comp.get('parity_vs_groq', 0)}%) · "
+                text=f"Online · gois.v1 {comp.get('overall', 0)}% (paridade vs {MODEL_NAME['mistral']} {(comp.get('parity_by_model') or {}).get(mkey('Mistral', self.sel_models.get('Mistral'))) or 0}% · {MODEL_NAME['groq']} {(comp.get('parity_by_model') or {}).get(mkey('Groq', self.sel_models.get('Groq'))) or 0}%) · "
                      f"{comp.get('lessons_total', 0)} lições · Professor atual: {s.get('current_teacher') or '—'}\n"
                      f"Fornecedores com chave: {provs}" + (f"\n⚠ Último erro: {s['last_error']}" if s.get("last_error") else ""),
                 fg=THEME["bot"])
@@ -3006,6 +3196,7 @@ class GoisWindow(tk.Tk):
                 self.tokens_lbl.config(text=self.tokens_lbl.cget("text") + "   ·   Por fornecedor: " + "  |  ".join(parts))
         if not self.limit_var.get().strip() or self.limit_var.get() == "0":
             self.limit_var.set(str(lim))
+        self.init_selection()
         cats = comp.get("categories", {})
         sel = self.cat_list.curselection()
         for i, c in enumerate(DEFAULT_CATEGORIES):
