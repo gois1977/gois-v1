@@ -445,6 +445,43 @@ async def try_providers(messages, temperature=0.6, only=None, models=None, timeo
                         body = {"model": model_name, "messages": messages, "temperature": temperature}
                         if max_tokens:
                             body["max_tokens"] = max_tokens
+                        if p.get("local"):
+                            # Streaming: o túnel (Cloudflare) corta com HTTP 524 se o modelo demorar >100 s a responder
+                            # de uma só vez; em streaming os dados vão chegando e a ligação não é cortada.
+                            body["stream"] = True
+                            parts, usage = [], None
+                            async with client.stream("POST", p["url"], json=body, headers=headers,
+                                                     timeout=LOCAL_TIMEOUT) as sresp:
+                                if sresp.status_code != 200:
+                                    await sresp.aread()
+                                    errors.append(f"{p['name']}/{model_name}: HTTP {sresp.status_code}")
+                                    if sresp.status_code in (401, 403):
+                                        break
+                                    continue
+                                async for line in sresp.aiter_lines():
+                                    line = line.strip()
+                                    if not line.startswith("data:"):
+                                        continue
+                                    chunk = line[5:].strip()
+                                    if chunk == "[DONE]":
+                                        break
+                                    try:
+                                        j = json.loads(chunk)
+                                    except Exception:
+                                        continue
+                                    if isinstance(j, dict):
+                                        if j.get("usage"):
+                                            usage = j["usage"]
+                                        for ch in j.get("choices") or []:
+                                            parts.append(((ch.get("delta") or {}).get("content")) or "")
+                            text = "".join(parts).strip()
+                            if text:
+                                data = {"choices": [{"message": {"role": "assistant", "content": text}}]}
+                                if usage:
+                                    data["usage"] = usage
+                                return data, p["name"], model_name, errors
+                            errors.append(f"{p['name']}/{model_name}: resposta vazia")
+                            continue
                         resp = await client.post(p["url"], json=body, headers=headers,
                                                  timeout=(LOCAL_TIMEOUT if p.get("local") else timeout))
                         if resp.status_code == 200:
@@ -639,35 +676,40 @@ def parse_scores(text: str) -> dict:
     return out
 
 
-async def run_benchmark(cat: str) -> dict:
+async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> dict:
     async with job_slot("benchmark", cat):
         t0 = time.time()
-        # Falha logo (sem gastar tokens) só se o modelo estiver MESMO inacessível (3 tentativas).
-        alive, why = await local_alive()
-        if not alive:
-            raise RuntimeError("O servidor não consegue falar com o teu modelo: " + why + ".")
-        qdata, qprov, qmodel, errors = await try_providers(
-            [{"role": "system", "content": TEACHER_SYSTEM},
-             {"role": "user", "content": f"Escreve uma pergunta técnica avançada sobre: {cat}."}],
-            temperature=0.8, timeout=45.0, max_tokens=200)
-        if qdata is None:
-            raise RuntimeError("Erro ao gerar pergunta de benchmark: " + ("; ".join(errors[-3:]) or "sem fornecedores com chave") + ".")
-        question = reply_text(qdata)
-        add_tokens(usage_tokens(qdata, question), qprov)
+        if not gois_answer:
+            # Modo antigo (resposta pedida pelo servidor através do túnel; pode dar HTTP 524 em PCs lentos).
+            alive, why = await local_alive()
+            if not alive:
+                raise RuntimeError("O servidor não consegue falar com o teu modelo: " + why + ".")
+        if not question:
+            qdata, qprov, qmodel, errors = await try_providers(
+                [{"role": "system", "content": TEACHER_SYSTEM},
+                 {"role": "user", "content": f"Escreve uma pergunta técnica avançada sobre: {cat}."}],
+                temperature=0.8, timeout=45.0, max_tokens=200)
+            if qdata is None:
+                raise RuntimeError("Erro ao gerar pergunta de benchmark: " + ("; ".join(errors[-3:]) or "sem fornecedores com chave") + ".")
+            question = reply_text(qdata)
+            add_tokens(usage_tokens(qdata, question), qprov)
 
-        recent = [k for k in DB_KNOWLEDGE if k.get("category") == cat][-3:]
-        extra = "\n".join(f"- {k.get('title', '')}: {str(k.get('content', ''))[:700]}" for k in recent)
+        recent = [k for k in DB_KNOWLEDGE if k.get("category") == cat][-2:]
+        extra = "\n".join(f"- {k.get('title', '')}: {str(k.get('content', ''))[:350]}" for k in recent)
         plain = [{"role": "user", "content": question}]
         gois_msgs = prepare_messages(plain, is_admin=True, extra_context=extra)
         ref_msgs = [{"role": "system", "content": "Responde de forma rigorosa e concisa."}, {"role": "user", "content": question}]
 
         async def ask(msgs, **kw):
             tmo = 150.0 if kw.get("scope") == "admin" else 45.0
-            d, prov, model, _ = await try_providers(msgs, temperature=0.4, timeout=tmo, max_tokens=450, **kw)
+            d, prov, model, _ = await try_providers(msgs, temperature=0.4, timeout=tmo, max_tokens=(250 if kw.get("scope") == "admin" else 450), **kw)
             return (reply_text(d), usage_tokens(d, reply_text(d)), prov, []) if d else ("", 0, None, _)
 
+        async def given_answer():
+            return gois_answer, max(1, len(gois_answer) // 4), "gois-local", []
+
         (g_txt, g_tok, g_prov, g_err), (gem_txt, gem_tok, gem_prov, _e1), (ds_txt, ds_tok, ds_prov, _e2) = await asyncio.gather(
-            ask(gois_msgs, scope="admin"),
+            (given_answer() if gois_answer else ask(gois_msgs, scope="admin")),
             ask(ref_msgs, only="Gemini"),
             ask(ref_msgs, only="OpenRouter", models=["deepseek/deepseek-chat-v3-0324:free"]),
         )
@@ -1037,6 +1079,27 @@ async def classroom_learn(request: Request):
     return {"lesson": lesson, "settings": settings_view()}
 
 
+@app.post("/api/comparison/question")
+async def comparison_question(request: Request):
+    """Devolve uma pergunta de benchmark e o contexto das lições; o painel pede a resposta ao LM Studio no PC."""
+    await require_admin(request)
+    body = await request.json()
+    cat = body.get("category")
+    if cat not in CATEGORIES:
+        raise HTTPException(400, "Categoria desconhecida.")
+    qdata, qprov, qmodel, errors = await try_providers(
+        [{"role": "system", "content": TEACHER_SYSTEM},
+         {"role": "user", "content": f"Escreve uma pergunta técnica avançada sobre: {cat}."}],
+        temperature=0.8, timeout=45.0, max_tokens=200)
+    if qdata is None:
+        raise HTTPException(502, "Erro ao gerar pergunta de benchmark: " + ("; ".join(errors[-3:]) or "sem fornecedores com chave") + ".")
+    question = reply_text(qdata)
+    add_tokens(usage_tokens(qdata, question), qprov)
+    recent = [k for k in DB_KNOWLEDGE if k.get("category") == cat][-2:]
+    context = "\n".join(f"- {k.get('title', '')}: {str(k.get('content', ''))[:350]}" for k in recent)
+    return {"question": question, "context": context}
+
+
 @app.post("/api/comparison/benchmark")
 async def comparison_benchmark(request: Request):
     await require_admin(request)
@@ -1051,7 +1114,8 @@ async def comparison_benchmark(request: Request):
     if cat not in CATEGORIES:
         raise HTTPException(400, "Categoria desconhecida.")
     try:
-        result = await run_benchmark(cat)
+        result = await run_benchmark(cat, str(body.get("question") or "")[:2000],
+                                     str(body.get("gois_answer") or "")[:8000])
     except Exception as e:
         raise HTTPException(502, str(e))
     return {"benchmark": result, "settings": settings_view()}
