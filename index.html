@@ -59,6 +59,39 @@ textarea{flex:1;background:transparent;color:var(--fg);border:0;resize:none;outl
  #ov.on{display:block}
  #menu{display:block}
 }
+.adm-only{display:none}
+body.admin .adm-only{display:block}
+body.admin #admBtn{display:inline-block}
+#admBtn{display:none}
+#adm{display:none;position:fixed;inset:0;z-index:30;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch}
+#adm.on{display:block}
+.adm-h{position:sticky;top:0;z-index:2;background:var(--panel);border-bottom:2px solid var(--accent);padding:10px 14px;padding-top:calc(10px + env(safe-area-inset-top,0px));display:flex;align-items:center;gap:8px;font-weight:600}
+.adm-w{max-width:900px;margin:0 auto;padding:14px 14px 60px;display:flex;flex-direction:column;gap:14px}
+.sec{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px}
+.sec h3{margin:0 0 8px;font-size:.9rem}
+.kg{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
+.k{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px}
+.k .l{font-size:.72rem;color:var(--muted)}
+.k .v{font-size:1.45rem;font-weight:700;line-height:1.3}
+.k .s{font-size:.7rem;color:var(--muted)}
+.bar{height:6px;background:var(--panel2);border-radius:4px;overflow:hidden;margin:4px 0}
+.bar>i{display:block;height:100%;background:var(--accent2)}
+.bar.warn>i{background:#d29922}
+.bar.full>i{background:var(--danger)}
+.tw{overflow-x:auto}
+table.t{width:100%;border-collapse:collapse;font-size:.82rem;min-width:420px}
+table.t th{color:var(--muted);font-weight:600;text-align:right;padding:6px 8px;border-bottom:1px solid var(--border)}
+table.t td{padding:7px 8px;text-align:right;border-bottom:1px solid var(--panel2)}
+table.t th:first-child,table.t td:first-child{text-align:left}
+table.t tr.sel td{background:var(--panel2)}
+table.t tbody tr{cursor:pointer}
+.in{background:var(--code);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font:inherit;font-size:.9rem;width:100%}
+.frow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.frow label{font-size:.78rem;color:var(--muted);min-width:78px}
+.frow .in{flex:1;min-width:90px}
+.muted{color:var(--muted);font-size:.78rem}
+.ok{color:#3fb950}.bad{color:#f85149}.warnc{color:#d29922}
+#admMsg{min-height:1.2em;font-size:.82rem}
 </style>
 </head>
 <body>
@@ -67,6 +100,7 @@ textarea{flex:1;background:transparent;color:var(--fg);border:0;resize:none;outl
   <div class="side-head">
     <button class="btn" onclick="newChat()">+ Nova conversa</button>
     <button class="btn alt" onclick="exportChat()">⬇ Exportar conversa (.md)</button>
+    <button class="btn alt adm-only" onclick="closeSide();openAdmin()">📊 Painel admin</button>
   </div>
   <div id="history"></div>
 </aside>
@@ -74,6 +108,7 @@ textarea{flex:1;background:transparent;color:var(--fg);border:0;resize:none;outl
   <div class="top">
     <button id="menu" onclick="toggleSide()">☰</button>
     <span id="brand" onclick="brandClick()">🟢 gois.v1</span>
+    <button id="admBtn" class="sm" onclick="openAdmin()">📊 Painel</button>
     <span id="title" style="margin-left:auto;color:var(--muted);font-size:.8rem;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%"></span>
   </div>
   <div id="chat"></div>
@@ -89,6 +124,15 @@ textarea{flex:1;background:transparent;color:var(--fg);border:0;resize:none;outl
       <div class="hint">Enter envia · Shift+Enter nova linha · arrasta ficheiros de texto/código para a caixa</div>
     </div>
   </div>
+</div>
+
+<div id="adm">
+  <div class="adm-h">
+    <span>📊 Painel admin</span>
+    <button class="sm" style="margin-left:auto" onclick="admLoad()">⟳ Atualizar</button>
+    <button class="sm" onclick="closeAdmin()">✕ Fechar</button>
+  </div>
+  <div class="adm-w" id="admBody"><div class="muted">A carregar…</div></div>
 </div>
 
 <script>
@@ -305,6 +349,176 @@ function exportChat(){
   const md = c.messages.map(m => `## ${m.role === 'user' ? 'Tu' : 'gois.v1'}\n\n${m.display || m.content}\n`).join('\n');
   download((c.title || 'conversa').replace(/[^\w\-]+/g,'_') + '.md', md);
 }
+
+
+// ================= Painel admin (só em modo admin) =================
+const fmtN = n => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+const fmtP = v => (v == null ? '—' : (Math.round(v * 10) / 10) + ' %');
+let admData = null, admSel = null, admBusy = false, admLocal = null;
+
+async function admApi(path, method, body){
+  const r = await fetch(API + path, {method: method || 'GET', headers: hdrs(), body: body === undefined ? undefined : JSON.stringify(body)});
+  let j = null; try{ j = await r.json(); }catch(e){}
+  if(!r.ok) throw new Error((j && (j.detail || (j.error && j.error.message))) || ('HTTP ' + r.status));
+  return j;
+}
+function parseTok(raw){
+  raw = String(raw || '').trim().toLowerCase().replace(/[.,\s]/g, '');
+  let m = 1;
+  if(raw.endsWith('k')){ m = 1e3; raw = raw.slice(0, -1); } else if(raw.endsWith('m')){ m = 1e6; raw = raw.slice(0, -1); }
+  const n = parseInt(raw || '0', 10);
+  if(isNaN(n) || n < 0) throw new Error('Número inválido (ex.: 300000 ou 300k).');
+  return n * m;
+}
+function ce(tag, cls, text){ const e = document.createElement(tag); if(cls) e.className = cls; if(text != null) e.textContent = text; return e; }
+function admMsg(text, cls){ const m = $('admMsg'); if(m){ m.textContent = text || ''; m.className = cls || 'muted'; } }
+
+function openAdmin(){ if(!isAdmin) return; $('adm').classList.add('on'); admLoad(); }
+function closeAdmin(){ $('adm').classList.remove('on'); }
+
+async function admLoad(){
+  try{
+    admData = await admApi('/api/settings');
+  }catch(e){
+    $('admBody').replaceChildren(ce('div', 'bad', '❌ ' + e.message));
+    return;
+  }
+  admRender();
+  admApi('/api/local/status').then(s => { admLocal = s; admRenderLocal(); }).catch(() => {});
+}
+
+function admTotals(cats){
+  const out = {};
+  for(const [k, f] of [['gois','gois_score'], ['gemini','gemini_ref'], ['deepseek','deepseek_ref']]){
+    const v = Object.values(cats).map(e => e[f]).filter(x => x != null);
+    out[k] = {v: v.length ? v.reduce((a, b) => a + b, 0) / v.length : null, n: v.length};
+  }
+  return out;
+}
+function kpi(label, value, sub, cls){
+  const k = ce('div', 'k'); k.append(ce('div', 'l', label), ce('div', 'v ' + (cls || ''), value), ce('div', 's', sub || '')); return k;
+}
+function barEl(used, cap){
+  const b = ce('div', 'bar'), i = document.createElement('i');
+  const p = cap ? Math.min(100, used / cap * 100) : 0;
+  i.style.width = p + '%'; if(p >= 100) b.classList.add('full'); else if(p >= 80) b.classList.add('warn');
+  b.append(i); return b;
+}
+
+function admRender(){
+  const d = admData, body = $('admBody'); body.replaceChildren();
+  const comp = d.comparison || {}, cats = comp.categories || {}, names = d.categories || Object.keys(cats);
+  const tot = admTotals(cats), tok = d.tokens || {}, cap = d.capacity || {};
+  if(!admSel || !names.includes(admSel)) admSel = names[0];
+
+  // estado
+  const st = ce('div', 'sec');
+  const provs = (d.providers_with_key || []).join(', ') || 'NENHUM (configura chaves no Render)';
+  st.append(ce('div', '', 'Fornecedores com chave: ' + provs));
+  st.append(ce('div', 'muted', 'Professor atual: ' + (d.current_teacher || '—') + ' · Lições: ' + (comp.lessons_total || 0)));
+  const loc = ce('div', 'muted', 'Modelo próprio: a verificar…'); loc.id = 'admLocal'; st.append(loc);
+  if(d.last_error) st.append(ce('div', 'bad', '⚠ Último erro: ' + d.last_error));
+  const auto = !!d.learning_now;
+  const ab = ce('button', 'btn' + (auto ? '' : ' alt'), auto ? '⏸ Modo autónomo: ON' : '▶ Modo autónomo: OFF');
+  ab.style.marginTop = '8px'; ab.onclick = () => admAct('learning_now', () => admApi('/api/settings', 'POST', {learning_now: !auto}), r => r);
+  st.append(ab);
+  body.append(st);
+
+  // KPIs
+  const g = ce('div', 'kg');
+  g.append(kpi('gois.v1 · total', fmtP(tot.gois.v), tot.gois.n + '/' + names.length + ' categorias medidas'));
+  g.append(kpi('Gemini · total', fmtP(tot.gemini.v), tot.gemini.n + '/' + names.length + ' categorias medidas'));
+  g.append(kpi('DeepSeek · total', fmtP(tot.deepseek.v), tot.deepseek.n + '/' + names.length + ' categorias medidas'));
+  g.append(kpi('Paridade vs Gemini', comp.parity_vs_gemini ? comp.parity_vs_gemini + ' %' : '—', 'gois.v1 ÷ Gemini'));
+  g.append(kpi('Paridade vs DeepSeek', comp.parity_vs_deepseek ? comp.parity_vs_deepseek + ' %' : '—', 'gois.v1 ÷ DeepSeek'));
+  g.append(kpi('Capacidade restante (estim.)', cap.total_capacity ? fmtN(cap.total_remaining) : '—', cap.total_capacity ? 'de ' + fmtN(cap.total_capacity) : 'define abaixo'));
+  g.append(kpi('Tokens hoje', fmtN(tok.used_today), 'limite ' + (tok.daily_limit ? fmtN(tok.daily_limit) : '∞') + ' · total ' + fmtN(tok.used_total)));
+  body.append(g);
+
+  // tokens e capacidade
+  const ts = ce('div', 'sec'); ts.append(ce('h3', '', '🔋 Tokens e capacidade diária (estimativa)'));
+  const inputs = {};
+  for(const [n, r] of Object.entries(cap.providers || {})){
+    const row = ce('div'); 
+    row.append(ce('div', 'muted', n + ': ' + fmtN(r.used) + ' gastos' + (r.capacity ? ' de ' + fmtN(r.capacity) : ' (capacidade desconhecida)')));
+    row.append(barEl(r.used, r.capacity));
+    const fr = ce('div', 'frow'); fr.append(ce('label', '', 'Capacidade'));
+    const inp = ce('input', 'in'); inp.value = r.capacity || 0; inp.inputMode = 'numeric'; inputs[n] = inp; fr.append(inp);
+    row.append(fr); ts.append(row);
+  }
+  const sc = ce('button', 'btn alt', 'Guardar capacidade'); sc.style.marginTop = '8px';
+  sc.onclick = () => { try{
+    const caps = {}; for(const [n, i] of Object.entries(inputs)) caps[n] = parseTok(i.value);
+    admAct('cap', () => admApi('/api/settings', 'POST', {provider_capacity: caps}), r => r);
+  }catch(e){ admMsg('❌ ' + e.message, 'bad'); } };
+  ts.append(sc);
+  const lf = ce('div', 'frow'); lf.style.marginTop = '12px'; lf.append(ce('label', '', 'Limite/dia'));
+  const li = ce('input', 'in'); li.value = tok.daily_limit || 0; li.inputMode = 'numeric'; lf.append(li);
+  const lb = ce('button', 'btn alt', 'Guardar'); lb.onclick = () => { try{
+    const v = parseTok(li.value); admAct('limit', () => admApi('/api/settings', 'POST', {daily_token_limit: v}), r => r);
+  }catch(e){ admMsg('❌ ' + e.message, 'bad'); } };
+  const l75 = ce('button', 'btn alt', '75 % da capacidade'); l75.onclick = () => { if(cap.total_capacity) li.value = Math.floor(cap.total_capacity * 0.75); };
+  lf.append(lb, l75); ts.append(lf);
+  ts.append(ce('div', 'muted', 'Limite/dia pára o modo autónomo quando o total gasto o atinge. Capacidade é uma estimativa dos limites grátis de cada fornecedor.'));
+  body.append(ts);
+
+  // categorias
+  const cs = ce('div', 'sec'); cs.append(ce('h3', '', '📊 Comparação por categoria (toca para escolher)'));
+  const tw = ce('div', 'tw'), tb = ce('table', 't');
+  const head = ce('tr'); ['Categoria', 'gois.v1', 'Gemini', 'DeepSeek', 'Lições', 'Bench.'].forEach(h => head.append(ce('th', '', h)));
+  const th = ce('thead'); th.append(head); tb.append(th);
+  const tbd = ce('tbody');
+  names.forEach(n => {
+    const e = cats[n] || {}, tr = ce('tr', n === admSel ? 'sel' : '');
+    [n, fmtP(e.gois_score), fmtP(e.gemini_ref), fmtP(e.deepseek_ref), e.lessons || 0, e.benchmarks || 0].forEach(v => tr.append(ce('td', '', String(v))));
+    tr.onclick = () => { admSel = n; [...tbd.children].forEach(c => c.classList.remove('sel')); tr.classList.add('sel'); $('admSelLbl').textContent = 'Selecionada: ' + n; };
+    tbd.append(tr);
+  });
+  tb.append(tbd); tw.append(tb); cs.append(tw);
+  const sl = ce('div', 'muted', 'Selecionada: ' + admSel); sl.id = 'admSelLbl'; sl.style.margin = '8px 0'; cs.append(sl);
+  const fr2 = ce('div', 'frow');
+  const bs = ce('button', 'btn', '📚 Estudar'); bs.onclick = () => admRunLearn();
+  const bb = ce('button', 'btn alt', '⚔️ Benchmark'); bb.onclick = () => admRunBench();
+  fr2.append(bs, bb); cs.append(fr2);
+  cs.append(ce('div', 'muted', 'O benchmark demora 30–90 s e gasta tokens.'));
+  body.append(cs);
+
+  const msg = ce('div', 'muted'); msg.id = 'admMsg'; body.append(msg);
+  admRenderLocal();
+}
+function admRenderLocal(){
+  const e = $('admLocal'); if(!e || !admLocal) return;
+  e.textContent = 'Modelo próprio: ' + (admLocal.online ? '🟢 online (' + admLocal.model + ')' : admLocal.url_set ? '🔴 offline' + (admLocal.error ? ' (' + admLocal.error + ')' : '') : '⚪ sem URL configurado');
+}
+
+async function admAct(tag, work, pick){
+  if(admBusy){ admMsg('⏳ Já há uma operação em curso…', 'warnc'); return; }
+  admBusy = true; admMsg('⏳ A guardar…', 'muted');
+  try{ const r = await work(); admData = pick(r); admRender(); admMsg('✅ Guardado.', 'ok'); }
+  catch(e){ admMsg('❌ ' + e.message, 'bad'); }
+  admBusy = false;
+}
+async function admRunLearn(){
+  if(admBusy){ admMsg('⏳ Já há uma operação em curso…', 'warnc'); return; }
+  const cat = admSel; admBusy = true; admMsg('📚 A estudar «' + cat + '»…', 'muted');
+  try{
+    const r = await admApi('/api/classroom/learn', 'POST', {category: cat});
+    admData = r.settings; admRender(); admMsg('✅ Nova lição: ' + ((r.lesson && r.lesson.title) || cat), 'ok');
+  }catch(e){ admMsg('❌ ' + e.message, 'bad'); }
+  admBusy = false;
+}
+async function admRunBench(){
+  if(admBusy){ admMsg('⏳ Já há uma operação em curso…', 'warnc'); return; }
+  const cat = admSel; admBusy = true; admMsg('⚔️ Benchmark em «' + cat + '» (30–90 s)…', 'muted');
+  try{
+    const r = await admApi('/api/comparison/benchmark', 'POST', {category: cat});
+    const b = r.benchmark || {};
+    admData = r.settings; admRender();
+    admMsg('✅ gois.v1 ' + fmtP(b.gois_score) + ' · Gemini ' + fmtP(b.gemini_ref) + ' · DeepSeek ' + fmtP(b.deepseek_ref), 'ok');
+  }catch(e){ admMsg('❌ ' + e.message, 'bad'); }
+  admBusy = false;
+}
+document.addEventListener('keydown', e => { if(e.key === 'Escape') closeAdmin(); });
 
 (async function(){
   await initAdmin(); load();
