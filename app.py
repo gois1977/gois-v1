@@ -79,6 +79,12 @@ def today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+# Capacidade diária ESTIMADA (tokens/dia) por fornecedor. 0 = desconhecida (não entra na soma).
+# Groq (plano grátis, documentação oficial): llama-3.3-70b-versatile 100K/dia + openai/gpt-oss-120b 200K/dia.
+# Os outros ficam a 0 porque não publicam um limite diário em tokens; edita no painel (Sala de Aula).
+DEFAULT_CAPACITY = {"Groq": 300_000, "Gemini": 0, "OpenRouter": 0, "Mistral": 0}
+
+
 def default_settings() -> dict:
     return {
         "classroom_mode": True,
@@ -89,6 +95,7 @@ def default_settings() -> dict:
         "last_teacher": "",
         "last_error": "",
         "daily_token_limit": 0,
+        "provider_capacity": dict(DEFAULT_CAPACITY),
         "tokens": {
             "used_today": 0, "daily_limit": 0, "used_total": 0, "date": today(),
             "auto_paused_by_limit": False, "limit_reached": False,
@@ -143,17 +150,21 @@ def skill_id(title: str) -> str:
 def tokens_state() -> dict:
     t = DB_SETTINGS.setdefault("tokens", {})
     if t.get("date") != today():
-        t.update(date=today(), used_today=0, auto_paused_by_limit=False, limit_reached=False)
+        t.update(date=today(), used_today=0, auto_paused_by_limit=False, limit_reached=False, by_provider={})
+    t.setdefault("by_provider", {})
     t["daily_limit"] = int(DB_SETTINGS.get("daily_token_limit") or 0)
     t.setdefault("used_today", 0)
     t.setdefault("used_total", 0)
     return t
 
 
-def add_tokens(n: int) -> None:
+def add_tokens(n: int, provider=None) -> None:
     t = tokens_state()
     t["used_today"] += int(n or 0)
     t["used_total"] += int(n or 0)
+    if provider:
+        bp = t["by_provider"]
+        bp[provider] = int(bp.get(provider, 0)) + int(n or 0)
     t["limit_reached"] = bool(t["daily_limit"] and t["used_today"] >= t["daily_limit"])
 
 
@@ -191,6 +202,23 @@ def rate_limit_public(request: Request, limit: int = 30, window: int = 60) -> No
 
 # --------------------------------------------------------------------------- #
 # Fornecedores LLM
+def capacity_view() -> dict:
+    """Capacidade diária estimada vs. tokens gastos hoje, por fornecedor externo."""
+    cap = DB_SETTINGS.setdefault("provider_capacity", dict(DEFAULT_CAPACITY))
+    for name, v in DEFAULT_CAPACITY.items():
+        cap.setdefault(name, v)
+    used = tokens_state().get("by_provider", {})
+    rows, total_cap, total_used = {}, 0, 0
+    for name in DEFAULT_CAPACITY:
+        c, u = int(cap.get(name) or 0), int(used.get(name, 0))
+        rows[name] = {"capacity": c, "used": u, "remaining": max(0, c - u) if c else None}
+        if c:
+            total_cap += c
+            total_used += u
+    return {"providers": rows, "total_capacity": total_cap, "total_used": total_used,
+            "total_remaining": max(0, total_cap - total_used), "estimated": True}
+
+
 # --------------------------------------------------------------------------- #
 PROVIDERS = [
     {
@@ -407,7 +435,7 @@ async def make_llm_request(payload: dict, is_admin: bool = False):
     if data is None:
         return None, errors
     data["model"] = "gois.v1"
-    add_tokens(usage_tokens(data, reply_text(data)))
+    add_tokens(usage_tokens(data, reply_text(data)), prov)
     return data, []
 
 
@@ -447,7 +475,7 @@ async def stream_llm_request(payload: dict, is_admin: bool = False):
                                 chunk["model"] = "gois.v1"
                                 yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
                         if got_content:
-                            add_tokens(max(1, chars // 4))
+                            add_tokens(max(1, chars // 4), p["name"])
                             yield "data: [DONE]\n\n"
                             return
                     except Exception as e:
@@ -541,7 +569,7 @@ async def learn_category(cat: str, provider: str = "auto") -> dict:
         if data is None:
             raise RuntimeError("Erro ao gerar lição: " + " | ".join(errors[:4]))
         text = reply_text(data)
-        add_tokens(usage_tokens(data, text))
+        add_tokens(usage_tokens(data, text), prov)
         title, body = parse_lesson(text, cat)
         lesson = {"id": uuid.uuid4().hex[:12], "category": cat, "title": title, "content": body,
                   "teacher": f"gois.v1", "created": now_iso()}
@@ -570,7 +598,7 @@ async def run_benchmark(cat: str) -> dict:
         if qdata is None:
             raise RuntimeError("Erro ao gerar pergunta de benchmark.")
         question = reply_text(qdata)
-        add_tokens(usage_tokens(qdata, question))
+        add_tokens(usage_tokens(qdata, question), qprov)
 
         recent = [k for k in DB_KNOWLEDGE if k.get("category") == cat][-3:]
         extra = "\n".join(f"- {k.get('title', '')}: {str(k.get('content', ''))[:700]}" for k in recent)
@@ -580,14 +608,16 @@ async def run_benchmark(cat: str) -> dict:
 
         async def ask(msgs, **kw):
             d, prov, model, _ = await try_providers(msgs, temperature=0.4, timeout=45.0, max_tokens=450, **kw)
-            return (reply_text(d), usage_tokens(d, reply_text(d))) if d else ("", 0)
+            return (reply_text(d), usage_tokens(d, reply_text(d)), prov) if d else ("", 0, None)
 
-        (g_txt, g_tok), (gem_txt, gem_tok), (ds_txt, ds_tok) = await asyncio.gather(
+        (g_txt, g_tok, g_prov), (gem_txt, gem_tok, gem_prov), (ds_txt, ds_tok, ds_prov) = await asyncio.gather(
             ask(gois_msgs, scope="admin"),
             ask(ref_msgs, only="Gemini"),
             ask(ref_msgs, only="OpenRouter", models=["deepseek/deepseek-chat-v3-0324:free"]),
         )
-        add_tokens(g_tok + gem_tok + ds_tok)
+        add_tokens(g_tok, g_prov)
+        add_tokens(gem_tok, gem_prov)
+        add_tokens(ds_tok, ds_prov)
         if not g_txt:
             raise RuntimeError("O teu modelo está offline; liga-o no painel (▶ Ligar modelo próprio) para correr o benchmark.")
 
@@ -602,7 +632,7 @@ async def run_benchmark(cat: str) -> dict:
             temperature=0.0, timeout=45.0, max_tokens=60)
         if jdata is None:
             raise RuntimeError("Erro no juiz de benchmark.")
-        add_tokens(usage_tokens(jdata))
+        add_tokens(usage_tokens(jdata), jprov)
         scores = parse_scores(reply_text(jdata))
         by_name = {name: scores.get(letters[i]) for i, (name, _) in enumerate(entries)}
 
@@ -700,6 +730,7 @@ def settings_view() -> dict:
     view["own_model_url_set"] = bool(LOCAL_PROVIDER["url"])
     view["categories"] = CATEGORIES
     view["server_time"] = now_iso()
+    view["capacity"] = capacity_view()
     return view
 
 
@@ -722,6 +753,14 @@ async def update_settings(request: Request):
         except Exception:
             raise HTTPException(400, "daily_token_limit inválido.")
         tokens_state()["auto_paused_by_limit"] = False
+    if isinstance(body.get("provider_capacity"), dict):
+        cap = DB_SETTINGS.setdefault("provider_capacity", dict(DEFAULT_CAPACITY))
+        for name, v in body["provider_capacity"].items():
+            if name in DEFAULT_CAPACITY:
+                try:
+                    cap[name] = max(0, int(v))
+                except Exception:
+                    raise HTTPException(400, f"provider_capacity.{name} inválido.")
     if body.get("learning_now"):
         tokens_state()["auto_paused_by_limit"] = False
     ensure_classroom_task()
@@ -773,6 +812,53 @@ async def local_status(request: Request):
             error = type(e).__name__
     return {"url_set": bool(base), "online": online, "error": error,
             "model": LOCAL_PROVIDER["models"][0], "routing": "admin=modelo próprio; público=fornecedores"}
+
+
+@app.post("/api/state/restore")
+async def state_restore(request: Request):
+    """Repõe, sem apagar nada, o estado que o servidor perdeu (restart/redeploy no Render).
+
+    Só ACRESCENTA: uma categoria só é reposta se a cópia tiver mais benchmarks do que o servidor;
+    os contadores de tokens só sobem; o limite e a capacidade só são repostos se o servidor estiver nos valores por omissão.
+    """
+    await require_admin(request)
+    body = await request.json()
+
+    def as_int(v) -> int:
+        try:
+            return max(0, int(v or 0))
+        except Exception:
+            return 0
+
+    n_cats = 0
+    for cat, e in ((body.get("comparison") or {}).get("categories") or {}).items():
+        if cat not in CATEGORIES or not isinstance(e, dict):
+            continue
+        cur = comp_entry(cat)
+        if as_int(e.get("benchmarks")) > as_int(cur.get("benchmarks")):
+            for k in ("gois_score", "gemini_ref", "deepseek_ref", "benchmarks", "last_benchmark"):
+                cur[k] = e.get(k)
+            n_cats += 1
+
+    t = tokens_state()
+    bt = body.get("tokens") or {}
+    t["used_total"] = max(as_int(t.get("used_total")), as_int(bt.get("used_total")))
+    if bt.get("date") == t.get("date"):
+        t["used_today"] = max(as_int(t.get("used_today")), as_int(bt.get("used_today")))
+        for name, v in (bt.get("by_provider") or {}).items():
+            t["by_provider"][name] = max(as_int(t["by_provider"].get(name)), as_int(v))
+
+    if not as_int(DB_SETTINGS.get("daily_token_limit")) and as_int(body.get("daily_token_limit")):
+        DB_SETTINGS["daily_token_limit"] = as_int(body.get("daily_token_limit"))
+    cap = DB_SETTINGS.setdefault("provider_capacity", dict(DEFAULT_CAPACITY))
+    for name, v in (body.get("provider_capacity") or {}).items():
+        if name in DEFAULT_CAPACITY and cap.get(name) == DEFAULT_CAPACITY[name]:
+            cap[name] = as_int(v)
+
+    recompute_comparison()
+    save_db()
+    logger.info("state_restore: %d categorias repostas", n_cats)
+    return settings_view()
 
 
 @app.get("/api/dataset")
