@@ -31,7 +31,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE_DIR / "data"))
 DB_FILE = DATA_DIR / "gois_db.json"
 
 # Token de administrador fixo diretamente no código para evitar falhas no Render
-ADMIN_TOKEN = "Vicente2013@"
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
 CLASSROOM_INTERVAL = int(os.environ.get("CLASSROOM_INTERVAL", "60"))  # segundos entre lições automáticas
 
