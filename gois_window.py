@@ -6,6 +6,7 @@ pesquisável e anexos, Sala de Aula com cópia local e 120 skills integradas.
 """
 import os
 import re
+import math
 import sys
 import csv
 import json
@@ -86,6 +87,55 @@ THEME = dict(THEMES["dark"])
 def set_theme(name: str) -> None:
     THEME.clear()
     THEME.update(THEMES.get(name, THEMES["dark"]))
+
+
+def blend(c1, c2, a):
+    """Mistura a cor c1 sobre c2 com opacidade a (0..1); cores '#rrggbb'."""
+    try:
+        r1, g1, b1 = (int(c1[i:i + 2], 16) for i in (1, 3, 5))
+        r2, g2, b2 = (int(c2[i:i + 2], 16) for i in (1, 3, 5))
+        return "#%02x%02x%02x" % (round(r2 + (r1 - r2) * a), round(g2 + (g1 - g2) * a), round(b2 + (b1 - b2) * a))
+    except Exception:
+        return c1
+
+
+class StatusLamp(tk.Canvas):
+    """Indicador animado: bolinha com anel a pulsar, 'respiração' lenta, spinner ou círculo com número, mais texto."""
+
+    def __init__(self, master, bg, width=200, height=28):
+        super().__init__(master, width=width, height=height, bg=bg, highlightthickness=0, bd=0)
+        self.bgc, self.h = bg, height
+        self.mode, self.color, self.text, self.count = "off", THEME["muted"], "", 0
+
+    def set(self, mode, color, text, count=0):
+        self.mode, self.color, self.text, self.count = mode, color, text, count
+
+    def draw(self, t):
+        self.delete("all")
+        cx, cy, c, bg = 18, self.h // 2, self.color, self.bgc
+        if self.mode == "pulse":
+            p = (t * 0.9) % 1.0
+            r = 5 + 9 * p
+            self.create_oval(cx - r, cy - r, cx + r, cy + r, outline=blend(c, bg, 1 - p), width=2)
+            self.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill=c, outline="")
+        elif self.mode == "slow":
+            k = 0.5 + 0.5 * math.sin(t * 2.2)
+            self.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, fill=blend(c, bg, 0.3 + 0.7 * k), outline="")
+        elif self.mode == "spin":
+            self.create_oval(cx - 9, cy - 9, cx + 9, cy + 9, outline=blend(c, bg, 0.25), width=3)
+            self.create_arc(cx - 9, cy - 9, cx + 9, cy + 9, start=-(t * 320) % 360, extent=100, style=tk.ARC, outline=c, width=3)
+        elif self.mode == "badge":
+            on = (self.count or 0) > 0
+            if on:
+                p = (t * 1.1) % 1.0
+                r = 11 + 4 * p
+                self.create_oval(cx - r, cy - r, cx + r, cy + r, outline=blend(c, bg, 1 - p), width=2)
+            self.create_oval(cx - 11, cy - 11, cx + 11, cy + 11, fill=c if on else blend(c, bg, 0.22), outline="")
+            self.create_text(cx, cy, text=str(self.count or 0), fill="#ffffff" if on else blend(THEME["muted"], bg, 0.9),
+                             font=("Segoe UI Semibold", 11))
+        else:
+            self.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill=c, outline="")
+        self.create_text(cx + 22, cy, text=self.text, anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
 
 
 def series_color(key: str) -> str:
@@ -457,6 +507,15 @@ class GoisWindow(tk.Tk):
         self.history = hist if isinstance(hist, list) else []
         self.kb = []
         self.class_busy = False
+        self.class_kind = None            # 'learn' | 'benchmark' enquanto este painel executa algo
+        self.class_cat = ""
+        self.server_job = {}               # o que o servidor diz que está a correr (/api/job)
+        self.model_state = "nosession"    # online | offline | nolink | noserver | nosession | checking
+        self.lamps = []
+        self._lamp_t = 0.0
+        self._health_busy = False
+        self._job_busy = False
+        self._health_defer = None
         self._emb = []
         self._conn_after = None
         self._poll_after = None
@@ -481,6 +540,9 @@ class GoisWindow(tk.Tk):
         self._live_after = self.after(3000, self.live_tick)
         self._bench_after = self.after(90_000, self.bench_tick)
         self.after(100, self.pump)
+        self.after(200, self.anim_tick)
+        self.after(3_500, self.health_tick)
+        self.after(4_500, self.job_tick)
         self.after(400, self.first_run_token)
         atexit.register(self.stop_tunnel)              # não deixa o túnel aberto ao fechar o painel
         self.after(15_000, self.local_watch_tick)      # procura .gguf novo (instalação automática)
@@ -602,11 +664,14 @@ class GoisWindow(tk.Tk):
     # ---------------- UI base ----------------
     def build_ui(self):
         self.kpi = {}
+        self.lamps = []
         header = tk.Frame(self, bg=THEME["panel"], height=54, highlightbackground=THEME["border"], highlightthickness=1)
         header.pack(side=tk.TOP, fill=tk.X)
         header.pack_propagate(False)
         tk.Label(header, text=" g ", bg=THEME["accent"], fg="#ffffff", font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT, padx=(16, 8), pady=10)
         tk.Label(header, text="gois.v1", bg=THEME["panel"], fg=THEME["fg"], font=("Segoe UI Semibold", 13)).pack(side=tk.LEFT)
+        self.model_lamp = self.make_lamp(header, THEME["panel"], 210, 30)
+        self.model_lamp.pack(side=tk.LEFT, padx=(10, 0))
         tk.Label(header, text="Office & Command Center", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=8)
         self.btn(header, "⚙ Definições", self.open_settings).pack(side=tk.RIGHT, padx=(6, 14), pady=10)
         self.theme_btn = self.btn(header, "☀ Claro" if THEME["name"] == "dark" else "🌙 Escuro", self.toggle_theme)
@@ -1592,6 +1657,8 @@ class GoisWindow(tk.Tk):
         tk.Label(top, text="Comparação ao vivo", bg=THEME["bg"], fg=THEME["fg"], font=("Segoe UI Semibold", 13)).pack(side=tk.LEFT)
         self.cmp_stamp = tk.Label(top, text="", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9))
         self.cmp_stamp.pack(side=tk.LEFT, padx=12)
+        self.bench_lamp = self.make_lamp(top, THEME["bg"], 330, 34)
+        self.bench_lamp.pack(side=tk.LEFT, padx=8)
         self.btn(top, "⬇ CSV", self.export_comparison_csv).pack(side=tk.RIGHT, padx=3)
         self.bench_all_btn = self.btn(top, "⚔ Benchmark às 16", self.bench_all)
         self.bench_all_btn.pack(side=tk.RIGHT, padx=3)
@@ -1835,12 +1902,15 @@ class GoisWindow(tk.Tk):
     def run_benchmark(self, cat, then=None):
         if self.class_busy:
             return False
-        self.set_class_busy(True, f"⚔️ Benchmark em [{cat}] (gois.v1 vs Gemini vs DeepSeek, ~30–90 s)…")
+        self.set_class_busy(True, f"⚔️ Benchmark em [{cat}] (gois.v1 vs Gemini vs DeepSeek, ~30–90 s)…", kind="benchmark", cat=cat)
 
         def done(res, err):
             self.set_class_busy(False)
             if err:
                 self.class_log(f"❌ Erro no benchmark [{cat}]: {err}")
+                self.flash(f"❌ Benchmark [{cat}] falhou: {self.short(err, 110)} (vê o registo da Sala de Aula)", THEME["danger"], 25000)
+                if then:
+                    self.class_log("⛔ Série de benchmarks parada no primeiro erro (para não gastar tokens).")
                 return
             b = res.get("benchmark", {})
             self.class_log(f"🏆 [{cat}] em {b.get('elapsed_s', '?')}s: gois.v1 {self.fnum(b.get('gois_score'))}% · "
@@ -1850,7 +1920,7 @@ class GoisWindow(tk.Tk):
             if then:
                 then()
 
-        self.bg(lambda: self.api.call("POST", "/api/comparison/benchmark", {"category": cat}, timeout=240), done)
+        self.bg(lambda: self.api.call("POST", "/api/comparison/benchmark", {"category": cat}, timeout=420), done)
         return True
 
     def run_benchmark_ui(self):
@@ -2095,6 +2165,8 @@ class GoisWindow(tk.Tk):
         top = tk.Frame(self.tab_class, bg=THEME["bg"])
         top.pack(fill=tk.X, padx=20, pady=(14, 4))
         tk.Label(top, text="🏫 Sala de Aula Autónoma", bg=THEME["bg"], fg=THEME["fg"], font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
+        self.study_lamp = self.make_lamp(top, THEME["bg"], 330, 30)
+        self.study_lamp.pack(side=tk.RIGHT, padx=(10, 0))
         self.btn(top, "📦 Exportar dataset", self.export_dataset, THEME["accent_blue"]).pack(side=tk.RIGHT)
         self.btn(top, "🧪 Testar Colab", self.test_colab).pack(side=tk.RIGHT, padx=6)
         self.btn(top, "🚀 Atualizar modelo (Colab)", self.update_model_colab, THEME["accent"]).pack(side=tk.RIGHT, padx=6)
@@ -2195,8 +2267,11 @@ class GoisWindow(tk.Tk):
             return False
         return True
 
-    def set_class_busy(self, busy, msg=None):
+    def set_class_busy(self, busy, msg=None, kind=None, cat=""):
         self.class_busy = busy
+        self.class_kind = kind if busy else None
+        self.class_cat = cat if busy else ""
+        self.refresh_lamps()
         st = tk.DISABLED if busy else tk.NORMAL
         for b in (self.study_btn, self.study_all_btn, self.bench_btn, self.bench_all_btn):
             b.config(state=st)
@@ -2208,7 +2283,7 @@ class GoisWindow(tk.Tk):
         return DEFAULT_CATEGORIES[sel[0]] if sel else DEFAULT_CATEGORIES[0]
 
     def study_category(self, cat, then=None):
-        self.set_class_busy(True, f"⚡ A estudar [{cat}] com modelo real…")
+        self.set_class_busy(True, f"⚡ A estudar [{cat}] com modelo real…", kind="learn", cat=cat)
 
         def done(res, err):
             self.set_class_busy(False)
@@ -2342,6 +2417,101 @@ class GoisWindow(tk.Tk):
             self.update_knowledge_ui()
 
         self.bg(work, done)
+
+    # ---------- indicadores animados ----------
+    def make_lamp(self, parent, bg, width, height=28):
+        lp = StatusLamp(parent, bg, width, height)
+        self.lamps.append(lp)
+        return lp
+
+    @staticmethod
+    def short(txt, n=30):
+        txt = str(txt or "")
+        return txt if len(txt) <= n else txt[: n - 1] + "…"
+
+    def refresh_lamps(self):
+        try:
+            job = self.server_job or {}
+            kind = self.class_kind or job.get("kind")
+            cat = self.class_cat if self.class_kind else (job.get("category") or "")
+            auto = bool((self.server_settings or {}).get("learning_now"))
+            studying, benching = kind == "learn", kind == "benchmark"
+            if studying:
+                self.study_lamp.set("spin", THEME["bot"], "A estudar · " + self.short(cat, 34))
+            elif auto:
+                self.study_lamp.set("slow", THEME["warn"], "Autónomo ON · à espera da próxima lição")
+            else:
+                self.study_lamp.set("off", THEME["muted"], "Em repouso · não está a estudar")
+            self.bench_lamp.set("badge", THEME["accent_blue"],
+                                ("A executar benchmark · " + self.short(cat, 26)) if benching else "Nenhum benchmark a correr",
+                                1 if benching else 0)
+            m = self.model_state
+            if m == "online":
+                self.model_lamp.set("pulse", THEME["bot"], "Modelo online e funcional")
+            elif m == "checking":
+                self.model_lamp.set("pulse", THEME["warn"], "A verificar o modelo…")
+            elif m == "offline":
+                self.model_lamp.set("off", THEME["danger"], "Modelo offline")
+            elif m == "nolink":
+                self.model_lamp.set("off", THEME["warn"], "Modelo não ligado ao servidor")
+            elif m == "noserver":
+                self.model_lamp.set("off", THEME["danger"], "Servidor sem resposta")
+            else:
+                self.model_lamp.set("off", THEME["muted"], "Modelo: sem sessão admin")
+        except (AttributeError, tk.TclError):
+            pass
+
+    def anim_tick(self):
+        self._lamp_t += 0.07
+        for lp in list(self.lamps):
+            try:
+                if lp.winfo_ismapped():
+                    lp.draw(self._lamp_t)
+            except tk.TclError:
+                if lp in self.lamps:
+                    self.lamps.remove(lp)
+        if int(self._lamp_t / 0.07) % 14 == 0:
+            self.refresh_lamps()
+        self.after(70, self.anim_tick)
+
+    def model_health_now(self):
+        self._health_defer = None
+        if not (self.connected and self.is_admin):
+            self.model_state = "nosession"
+            self.refresh_lamps()
+            return
+        if self._health_busy:
+            return
+        self._health_busy = True
+
+        def done(res, err):
+            self._health_busy = False
+            if err:
+                self.model_state = "noserver"
+            else:
+                r = res or {}
+                self.model_state = "online" if r.get("online") else ("offline" if r.get("url_set") else "nolink")
+            self.refresh_lamps()
+
+        self.bg(lambda: self.api.call("GET", "/api/local/status", timeout=25), done)
+
+    def health_tick(self):
+        self.after(20_000, self.health_tick)
+        self.model_health_now()
+
+    def job_tick(self):
+        self.after(8_000, self.job_tick)
+        if not (self.connected and self.is_admin) or self._job_busy:
+            return
+        self._job_busy = True
+
+        def done(res, err):
+            self._job_busy = False
+            if not err and isinstance(res, dict):
+                self.server_job = res.get("job") or {}
+                self.refresh_lamps()
+
+        self.bg(lambda: self.api.call("GET", "/api/job", timeout=15), done)
 
     # ---------- cópia de segurança do estado do servidor ----------
     @staticmethod
@@ -2557,7 +2727,7 @@ class GoisWindow(tk.Tk):
     def build_local_tab(self):
         c = self.cfg
         self.v_model = tk.StringVar(value=c.get("lm_model", ""))
-        self.v_ctx = tk.StringVar(value=str(c.get("lm_ctx", 2048)))
+        self.v_ctx = tk.StringVar(value=str(c.get("lm_ctx", 4096)))
         self.v_models_dir = tk.StringVar(value=c.get("lm_models_dir") or default_models_dir())
         self.v_watch_dir = tk.StringVar(value=c.get("watch_dir") or str(Path.home() / "Downloads"))
         self.v_auto_start = tk.BooleanVar(value=bool(c.get("auto_start_local", False)))
@@ -2628,6 +2798,12 @@ class GoisWindow(tk.Tk):
     def set_local_status(self, text, color="muted"):
         self.local_status_state = (text, color)
         try:
+            if self._health_defer:
+                self.after_cancel(self._health_defer)
+            self._health_defer = self.after(2500, self.model_health_now)
+        except Exception:
+            pass
+        try:
             self.local_status_lbl.config(text=text, fg=THEME.get(color, THEME["muted"]))
         except Exception:
             pass
@@ -2652,9 +2828,9 @@ class GoisWindow(tk.Tk):
 
     def save_local_cfg(self, *_):
         try:
-            ctx = int(self.v_ctx.get().strip() or 2048)
+            ctx = int(self.v_ctx.get().strip() or 4096)
         except ValueError:
-            ctx = 2048
+            ctx = 4096
         self.cfg.update(lm_model=self.v_model.get().strip(), lm_ctx=max(256, ctx), lm_models_dir=self.v_models_dir.get().strip(),
                         watch_dir=self.v_watch_dir.get().strip(),
                         auto_start_local=bool(self.v_auto_start.get()), auto_install_gguf=bool(self.v_auto_install.get()))
@@ -2730,7 +2906,7 @@ class GoisWindow(tk.Tk):
         if not auto and not self.require_admin_ui():
             return
         self.save_local_cfg()
-        model_key, ctx = self.cfg.get("lm_model", ""), self.cfg.get("lm_ctx", 2048)
+        model_key, ctx = self.cfg.get("lm_model", ""), self.cfg.get("lm_ctx", 4096)
         self.local_busy = True
         self.set_local_status("⏳ A ligar o modelo próprio…", "warn")
 
@@ -2762,7 +2938,7 @@ class GoisWindow(tk.Tk):
                     raise RuntimeError("O LM Studio não conseguiu carregar o modelo:\n" + out[-300:])
             url = self.open_tunnel(cf)
             self.llog(f"🌐 Túnel: {url}")
-            self.api.call("POST", "/api/local/config", {"url": url + "/v1", "model": LOCAL_IDENTIFIER}, timeout=60)
+            self.api.call("POST", "/api/local/config", {"url": url + "/v1", "model": LOCAL_IDENTIFIER, "ctx": int(self.cfg.get("lm_ctx", 4096) or 4096)}, timeout=60)
             return url
 
         def done(url, err):
@@ -2821,7 +2997,7 @@ class GoisWindow(tk.Tk):
             self.start_local(auto=True, only_tunnel=True)
             return
         url = self.local_url
-        self.bg(lambda: self.api.call("POST", "/api/local/config", {"url": url + "/v1", "model": LOCAL_IDENTIFIER}, timeout=30))
+        self.bg(lambda: self.api.call("POST", "/api/local/config", {"url": url + "/v1", "model": LOCAL_IDENTIFIER, "ctx": int(self.cfg.get("lm_ctx", 4096) or 4096)}, timeout=30))
         self.schedule_local_keepalive()
 
     def auto_start_tick(self, tries):
