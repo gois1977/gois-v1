@@ -109,6 +109,18 @@ DB_SKILLS: list = []
 DB_SETTINGS: dict = default_settings()
 CLASSROOM_TASK = None
 JOB_LOCK = asyncio.Lock()
+CURRENT_JOB = {"kind": None, "category": None, "since": None}   # o que o servidor está a fazer agora (learn / benchmark)
+
+
+@asynccontextmanager
+async def job_slot(kind: str, category: str):
+    """Como JOB_LOCK, mas regista o que está a correr para o painel mostrar «a estudar» / «a executar benchmark»."""
+    async with JOB_LOCK:
+        CURRENT_JOB.update(kind=kind, category=category, since=now_iso())
+        try:
+            yield
+        finally:
+            CURRENT_JOB.update(kind=None, category=None, since=None)
 
 
 def save_db() -> None:
@@ -554,7 +566,7 @@ TEACHER_SYSTEM = "És o sistema de ensino interno do gois.v1. Produz conteúdos 
 
 
 async def learn_category(cat: str, provider: str = "auto") -> dict:
-    async with JOB_LOCK:
+    async with job_slot("learn", cat):
         covered = [k.get("title", "") for k in DB_KNOWLEDGE if k.get("category") == cat][-12:]
         prompt = (
             f"Categoria: {cat}\n"
@@ -589,8 +601,19 @@ def parse_scores(text: str) -> dict:
 
 
 async def run_benchmark(cat: str) -> dict:
-    async with JOB_LOCK:
+    async with job_slot("benchmark", cat):
         t0 = time.time()
+        # Falha logo (sem gastar tokens) se o teu modelo não estiver ligado ao servidor.
+        offline = "O teu modelo está offline ou sem túnel; no painel carrega em ▶ Ligar modelo próprio e tenta de novo."
+        if not LOCAL_PROVIDER["url"]:
+            raise RuntimeError(offline)
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                alive = (await client.get(local_base_url() + "/models")).status_code == 200
+        except Exception:
+            alive = False
+        if not alive:
+            raise RuntimeError(offline)
         qdata, qprov, qmodel, errors = await try_providers(
             [{"role": "system", "content": TEACHER_SYSTEM},
              {"role": "user", "content": f"Escreve uma pergunta técnica avançada sobre: {cat}."}],
@@ -731,6 +754,7 @@ def settings_view() -> dict:
     view["categories"] = CATEGORIES
     view["server_time"] = now_iso()
     view["capacity"] = capacity_view()
+    view["job"] = dict(CURRENT_JOB)
     return view
 
 
@@ -812,6 +836,13 @@ async def local_status(request: Request):
             error = type(e).__name__
     return {"url_set": bool(base), "online": online, "error": error,
             "model": LOCAL_PROVIDER["models"][0], "routing": "admin=modelo próprio; público=fornecedores"}
+
+
+@app.get("/api/job")
+async def current_job(request: Request):
+    """Leve: o que o servidor está a fazer neste momento (para os indicadores animados do painel)."""
+    await require_admin(request)
+    return {"job": dict(CURRENT_JOB), "learning_now": bool(DB_SETTINGS.get("learning_now"))}
 
 
 @app.post("/api/state/restore")
