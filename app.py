@@ -1,10 +1,13 @@
-"""gois.v1 API 6.1 - chat separado por papel, Sala de Aula, benchmark, skills e persistência.
+"""gois.v1 API 6.2 - chat separado por papel, Sala de Aula, benchmark (gois.v1 vs Mistral e Groq), skills e persistência.
 
 ROTEAMENTO (novo na 6.1):
   Admin  (cabeçalho X-Admin-Token válido) -> SÓ o teu modelo (LM Studio via túnel). Sem Groq/Gemini/OpenRouter/Mistral.
                                               Se o modelo estiver desligado, o chat responde "offline".
   Público (sem token)                      -> SÓ fornecedores (Groq, Gemini, OpenRouter, Mistral). Nunca toca no teu PC.
   Sala de Aula / benchmark (professores)   -> fornecedores.
+
+COMPARAÇÃO (novo na 6.2): o gois.v1 é comparado com Mistral e Groq (campos mistral_ref / groq_ref).
+  As notas antigas de Gemini / DeepSeek (gemini_ref / deepseek_ref) continuam guardadas, mas já não são medidas.
 
 Variáveis de ambiente (Render > Environment):
   GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY   (pelo menos uma)
@@ -38,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger("uvicorn.error")
 
-VERSION = "6.1.0"
+VERSION = "6.2.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE_DIR / "data"))
 DB_FILE = DATA_DIR / "gois_db.json"
@@ -578,10 +581,27 @@ async def stream_llm_request(payload: dict, is_admin: bool = False):
 # --------------------------------------------------------------------------- #
 # Sala de Aula, comparação e benchmark
 # --------------------------------------------------------------------------- #
+# Modelos contra os quais o gois.v1 é comparado (a partir da 6.2): Mistral e Groq.
+# gemini_ref / deepseek_ref (até à 6.1) continuam guardados na base de dados e nas cópias de segurança
+# (nada se apaga), mas já não são medidos nem mostrados.
+SCORE_FIELDS = ("gois_score", "mistral_ref", "groq_ref")
+LEGACY_FIELDS = ("gemini_ref", "deepseek_ref")
+MODEL_KEYS = {"gois_score": "gois", "mistral_ref": "mistral", "groq_ref": "groq"}
+# Por modelo guardamos de onde vem cada nota: última nota crua, nº de medições, quando e QUE modelo respondeu de verdade.
+META_FIELDS = tuple(f"{k}_{m}" for k in MODEL_KEYS.values() for m in ("last", "n", "at", "model"))
+BENCH_MAX_TOKENS = 400       # igual para gois.v1, Mistral e Groq (antes: 250/450)
+BENCH_TEMPERATURE = 0.4
+CONTESTANTS = ("Mistral", "Groq")   # fornecedores que respondem no benchmark; o juiz prefere os outros
+
+
 def comp_entry(cat: str) -> dict:
     cats = DB_SETTINGS["comparison"].setdefault("categories", {})
-    return cats.setdefault(cat, {"gois_score": None, "gemini_ref": None, "deepseek_ref": None,
-                                 "benchmarks": 0, "last_benchmark": None, "lessons": 0})
+    e = cats.setdefault(cat, {})
+    # setdefault: as categorias já guardadas (com gemini_ref / deepseek_ref) ganham os campos novos sem perder nada.
+    for k, v in (("gois_score", None), ("mistral_ref", None), ("groq_ref", None),
+                 ("benchmarks", 0), ("last_benchmark", None), ("lessons", 0)):
+        e.setdefault(k, v)
+    return e
 
 
 def recompute_comparison() -> dict:
@@ -597,8 +617,16 @@ def recompute_comparison() -> dict:
         pairs = [(e["gois_score"], e[ref]) for e in ents if e.get("gois_score") is not None and e.get(ref)]
         return round(sum(a for a, _ in pairs) / sum(b for _, b in pairs) * 100, 1) if pairs else 0.0
 
-    comp["parity_vs_gemini"] = parity("gemini_ref")
-    comp["parity_vs_deepseek"] = parity("deepseek_ref")
+    # Paridade atual (Mistral, Groq) + a antiga (Gemini, DeepSeek), só para não perder o histórico.
+    for ref in SCORE_FIELDS[1:] + LEGACY_FIELDS:
+        comp["parity_vs_" + ref[:-4]] = parity(ref)
+
+    # Comparação justa: médias só nas categorias em que TODOS os modelos têm nota (mesmas perguntas, mesma base).
+    common = [e for e in ents if all(e.get(f) is not None for f in SCORE_FIELDS)]
+    comp["common_categories"] = len(common)
+    comp["like_for_like"] = {MODEL_KEYS[f]: (round(sum(e[f] for e in common) / len(common), 1) if common else None)
+                             for f in SCORE_FIELDS}
+    comp["measured"] = {MODEL_KEYS[f]: sum(1 for e in ents if e.get(f) is not None) for f in SCORE_FIELDS}
     comp["lessons_total"] = len(DB_KNOWLEDGE)
     return comp
 
@@ -704,7 +732,8 @@ async def judge_scores(question: str, entries: list):
                                         + ";".join(f"{letters[i]}=<nota>" for i in range(len(entries)))
                                         + ". Responde apenas nesse formato."}]
     errs = []
-    for p in get_providers("public"):
+    # Mistral e Groq são avaliados; por isso o juiz prefere Gemini / OpenRouter e só usa estes dois como último recurso.
+    for p in sorted(get_providers("public"), key=lambda x: x["name"] in CONTESTANTS):
         if not candidate_keys(p):
             continue
         jdata, jprov, jmodel, jerr = await try_providers(msgs, temperature=0.0, only=p["name"], timeout=45.0, max_tokens=120)
@@ -717,31 +746,6 @@ async def judge_scores(question: str, entries: list):
             return {name: sc[letters[i]] for i, (name, _) in enumerate(entries)}, errs
         errs.append(f"{jprov}: notas incompletas")
     return None, errs
-
-
-_DS_CACHE = {"ts": 0.0, "models": []}
-
-
-async def deepseek_models() -> list:
-    """Modelos DeepSeek gratuitos que existem AGORA no OpenRouter (os nomes mudam / são retirados com frequência)."""
-    if _DS_CACHE["models"] and time.time() - _DS_CACHE["ts"] < 3600:
-        return list(_DS_CACHE["models"])
-    found = []
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get("https://openrouter.ai/api/v1/models")
-        for m in (r.json().get("data") or []):
-            mid = str(m.get("id") or "")
-            pr = m.get("pricing") or {}
-            free = mid.endswith(":free") or (str(pr.get("prompt")) == "0" and str(pr.get("completion")) == "0")
-            if "deepseek" in mid.lower() and free:
-                found.append(mid)
-    except Exception as e:
-        logger.warning("Lista de modelos OpenRouter indisponível: %s", e)
-    found.sort(key=lambda x: (0 if ("chat" in x or "v3" in x) else 1, x))
-    models = found[:3] or ["deepseek/deepseek-chat-v3-0324:free"]
-    _DS_CACHE.update(ts=time.time(), models=models)
-    return list(models)
 
 
 async def probe_provider(name: str, models=None) -> dict:
@@ -797,29 +801,29 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
 
         async def ask(msgs, **kw):
             tmo = 150.0 if kw.get("scope") == "admin" else 45.0
-            d, prov, model, _ = await try_providers(msgs, temperature=0.4, timeout=tmo, max_tokens=(250 if kw.get("scope") == "admin" else 450), **kw)
-            return (reply_text(d), usage_tokens(d, reply_text(d)), prov, []) if d else ("", 0, None, _)
+            # Mesmas condições para os três modelos: mesma temperatura e mesmo limite de resposta (BENCH_MAX_TOKENS).
+            d, prov, model, _ = await try_providers(msgs, temperature=BENCH_TEMPERATURE, timeout=tmo, max_tokens=BENCH_MAX_TOKENS, **kw)
+            return (reply_text(d), usage_tokens(d, reply_text(d)), prov, model, []) if d else ("", 0, None, None, _)
 
         async def given_answer():
-            return gois_answer, max(1, len(gois_answer) // 4), "gois-local", []
+            return gois_answer, max(1, len(gois_answer) // 4), "gois-local", "gois-v1 (LM Studio)", []
 
-        ds_models = (await deepseek_models())[:3]
-        (g_txt, g_tok, g_prov, g_err), (gem_txt, gem_tok, gem_prov, _e1), (ds_txt, ds_tok, ds_prov, _e2) = await asyncio.gather(
+        (g_txt, g_tok, g_prov, g_model, g_err), (mis_txt, mis_tok, mis_prov, mis_model, _e1), (grq_txt, grq_tok, grq_prov, grq_model, _e2) = await asyncio.gather(
             (given_answer() if gois_answer else ask(gois_msgs, scope="admin")),
-            ask(ref_msgs, only="Gemini"),
-            ask(ref_msgs, only="OpenRouter", models=ds_models),
+            ask(ref_msgs, only="Mistral"),
+            ask(ref_msgs, only="Groq"),
         )
         add_tokens(g_tok, g_prov)
-        add_tokens(gem_tok, gem_prov)
-        add_tokens(ds_tok, ds_prov)
+        add_tokens(mis_tok, mis_prov)
+        add_tokens(grq_tok, grq_prov)
         if not g_txt:
             raise RuntimeError("O teu modelo não respondeu (" + ("; ".join(g_err[-2:]) or "sem detalhe") + "). "
                                "Confirma que está ligado (▶ Ligar modelo próprio) e com contexto de 4096.")
 
-        entries = [("gois", g_txt)] + [x for x in (("gemini", gem_txt), ("deepseek", ds_txt)) if x[1]]
+        entries = [("gois", g_txt)] + [x for x in (("mistral", mis_txt), ("groq", grq_txt)) if x[1]]
         if len(entries) < 2:
-            raise RuntimeError("Nenhum modelo de referência (Gemini/DeepSeek) respondeu, por isso não há com quem comparar. "
-                               "Confirma as chaves GEMINI_API_KEY / OPENROUTER_API_KEY no Render e tenta de novo.")
+            raise RuntimeError("Nenhum modelo de referência (Mistral/Groq) respondeu, por isso não há com quem comparar. "
+                               "Confirma as chaves MISTRAL_API_KEY / GROQ_API_KEY no Render e tenta de novo.")
         random.shuffle(entries)
         letters = "ABC"
         by_name, jerr = await judge_scores(question, entries)
@@ -831,18 +835,28 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
         def ema(prev, new):
             return prev if new is None else (new if prev is None else round(prev * 0.5 + new * 0.5, 1))
 
-        e["gois_score"] = ema(e["gois_score"], by_name.get("gois"))
-        if by_name.get("gemini") is not None:
-            e["gemini_ref"] = ema(e["gemini_ref"], by_name["gemini"])
-        if by_name.get("deepseek") is not None:
-            e["deepseek_ref"] = ema(e["deepseek_ref"], by_name["deepseek"])
+        stamp = now_iso()
+        models_used = {"gois": g_model, "mistral": mis_model, "groq": grq_model}
+        measured, missing = [], []
+        for field, key in MODEL_KEYS.items():
+            new_score = by_name.get(key)
+            if new_score is None:
+                missing.append(key)          # esse modelo não respondeu: a nota antiga NÃO é rejuvenescida
+                continue
+            e[field] = ema(e.get(field), new_score)
+            e[f"{key}_last"] = new_score
+            e[f"{key}_n"] = int(e.get(f"{key}_n") or 0) + 1
+            e[f"{key}_at"] = stamp
+            e[f"{key}_model"] = models_used.get(key)
+            measured.append(key)
         e["benchmarks"] = e.get("benchmarks", 0) + 1
-        e["last_benchmark"] = now_iso()
+        e["last_benchmark"] = stamp
         recompute_comparison()
         save_db()
         return {"category": cat, "question": question, "elapsed_s": round(time.time() - t0, 1),
-                "gois_score": by_name.get("gois"), "gemini_ref": by_name.get("gemini"),
-                "deepseek_ref": by_name.get("deepseek"), "judge": "gois.v1 system"}
+                "gois_score": by_name.get("gois"), "mistral_ref": by_name.get("mistral"),
+                "groq_ref": by_name.get("groq"), "judge": "gois.v1 system",
+                "measured": measured, "missing": missing, "models": models_used}
 
 
 async def classroom_loop() -> None:
@@ -1004,17 +1018,16 @@ async def local_status(request: Request):
 
 @app.get("/api/health/models")
 async def health_models(request: Request):
-    """Estado de chave + ligação do gois.v1 (túnel), Gemini e DeepSeek (via OpenRouter)."""
+    """Estado de chave + ligação do gois.v1 (túnel), Mistral e Groq."""
     await require_admin(request)
-    dsm = (await deepseek_models())[:3]
     if local_base_url():
         alive, why = await local_alive(retries=1, timeout=15.0)
     else:
         alive, why = False, "sem URL do modelo no servidor"
     gois = {"ok": alive, "state": "ok" if alive else "error",
             "detail": "o servidor alcança o LM Studio pelo túnel" if alive else why}
-    gem, ds = await asyncio.gather(probe_provider("Gemini"), probe_provider("OpenRouter", dsm))
-    return {"gois": gois, "gemini": gem, "deepseek": ds, "checked": now_iso()}
+    mis, grq = await asyncio.gather(probe_provider("Mistral"), probe_provider("Groq"))
+    return {"gois": gois, "mistral": mis, "groq": grq, "checked": now_iso()}
 
 
 @app.get("/api/job")
@@ -1046,8 +1059,9 @@ async def state_restore(request: Request):
             continue
         cur = comp_entry(cat)
         if as_int(e.get("benchmarks")) > as_int(cur.get("benchmarks")):
-            for k in ("gois_score", "gemini_ref", "deepseek_ref", "benchmarks", "last_benchmark"):
-                cur[k] = e.get(k)
+            for k in SCORE_FIELDS + LEGACY_FIELDS + META_FIELDS + ("benchmarks", "last_benchmark"):
+                if k in e:          # uma cópia antiga (sem mistral/groq) não apaga o que o servidor já mediu
+                    cur[k] = e[k]
             n_cats += 1
 
     t = tokens_state()
