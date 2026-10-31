@@ -1902,7 +1902,7 @@ class GoisWindow(tk.Tk):
     def run_benchmark(self, cat, then=None):
         if self.class_busy:
             return False
-        self.set_class_busy(True, f"⚔️ Benchmark em [{cat}] (gois.v1 vs Gemini vs DeepSeek, ~30–90 s)…", kind="benchmark", cat=cat)
+        self.set_class_busy(True, f"⚔️ Benchmark em [{cat}] (gois.v1 vs Gemini vs DeepSeek, pode demorar alguns minutos)…", kind="benchmark", cat=cat)
 
         def done(res, err):
             self.set_class_busy(False)
@@ -1920,8 +1920,49 @@ class GoisWindow(tk.Tk):
             if then:
                 then()
 
-        self.bg(lambda: self.api.call("POST", "/api/comparison/benchmark", {"category": cat}, timeout=420), done)
+        def work():
+            # 1) o servidor gera a pergunta; 2) o gois.v1 responde DIRETAMENTE no LM Studio deste PC (sem túnel,
+            # por isso sem o limite de 100 s da Cloudflare / HTTP 524); 3) o servidor junta Gemini/DeepSeek e avalia.
+            q = self.api.call("POST", "/api/comparison/question", {"category": cat}, timeout=90)
+            question = (q.get("question") or "").strip()
+            if not question:
+                raise ApiError("O servidor não gerou a pergunta do benchmark.")
+            answer = self.local_answer(question, q.get("context") or "")
+            return self.api.call("POST", "/api/comparison/benchmark",
+                                 {"category": cat, "question": question, "gois_answer": answer}, timeout=300)
+
+        self.bg(work, done)
         return True
+
+    def local_answer(self, question, context=""):
+        """Pede a resposta ao LM Studio local (127.0.0.1) — pode demorar minutos num PC lento, não há túnel pelo meio."""
+        base = f"http://127.0.0.1:{LM_PORT}/v1"
+        model = "gois-v1"
+        try:
+            with urllib.request.urlopen(base + "/models", timeout=10) as r:
+                ids = [m.get("id") for m in (json.loads(r.read().decode("utf-8", "replace")).get("data") or []) if m.get("id")]
+            if ids and model not in ids:
+                model = ids[0]
+        except Exception as e:
+            raise ApiError(f"LM Studio não responde em 127.0.0.1:{LM_PORT} ({e}). Abre o LM Studio e inicia o servidor local.")
+        system = "Tu és o gois.v1, um assistente técnico. Responde em português europeu, de forma rigorosa e concisa."
+        if context:
+            system += "\n\nNotas úteis:\n" + context[:1200]
+        body = json.dumps({"model": model, "temperature": 0.4, "max_tokens": 300, "stream": False,
+                           "messages": [{"role": "system", "content": system}, {"role": "user", "content": question}]},
+                          ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(base + "/chat/completions", data=body, method="POST",
+                                     headers={"Content-Type": "application/json", "Authorization": "Bearer lm-studio"})
+        try:
+            with urllib.request.urlopen(req, timeout=900) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        except Exception as e:
+            raise ApiError(f"O LM Studio não conseguiu responder ({e}).")
+        text = text.strip()
+        if not text:
+            raise ApiError("O LM Studio devolveu uma resposta vazia (confirma que o modelo está carregado).")
+        return text
 
     def run_benchmark_ui(self):
         if not self.require_admin_ui():
