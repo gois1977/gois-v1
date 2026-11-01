@@ -13,6 +13,10 @@ DIRETRIZES GERIDAS (novo): as diretrizes do prompt (admin / público) já não s
   reverter cada uma (GET/PUT /api/directives, POST /api/directives/{admin|public}, PUT|DELETE /api/directives/{âmbito}/{id},
   POST .../{id}/revert e POST /api/directives/{âmbito}/revert). Ficam gravadas em gois_db.json.
 
+ENVIRONMENT GERIDO (novo na 6.4): GET /api/env lista TODAS as variáveis do serviço (Render > Environment, com valores sensíveis
+  mascarados), GET /api/env/{NOME} mostra o valor, PUT /api/env/{NOME} cria/atualiza e DELETE /api/env/{NOME} remove.
+  Precisa de RENDER_API_KEY + RENDER_SERVICE_ID; sem elas só se vêem as variáveis do app e só as chaves dos fornecedores se mudam.
+
 SKILLS NO DATASET (novo): /api/dataset junta SEMPRE as lições e as skills. As skills também se editam, revertem (versão anterior),
   apagam (vão para o lixo e restauram-se) — PUT /api/skills/{id}, POST .../revert, POST .../restore, GET /api/skills/trash.
 
@@ -52,7 +56,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger("uvicorn.error")
 
-VERSION = "6.3.1"
+VERSION = "6.4.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE_DIR / "data"))
 DB_FILE = DATA_DIR / "gois_db.json"
@@ -1958,6 +1962,177 @@ async def delete_key(provider: str, request: Request):
     """Remove a chave do fornecedor (aqui e, se houver RENDER_API_KEY, no Render > Environment)."""
     await require_admin(request)
     return await apply_key(_provider_def(provider), "")
+
+
+# --- Environment (Render > Environment): listar / adicionar / editar / remover --------------------------------------
+ENV_PROTECTED = ("ADMIN_TOKEN", "RENDER_API_KEY", "RENDER_SERVICE_ID")      # mexer nestas pode deixar-te sem acesso: pedem «force»
+ENV_KNOWN = tuple(p["env"] for p in PROVIDERS) + (
+    "GROQ_MODEL", "ADMIN_TOKEN", "DATA_DIR", "CLASSROOM_INTERVAL", "GOIS_LOCAL_URL", "GOIS_LOCAL_MODEL", "GOIS_LOCAL_KEY",
+    "GOIS_LOCAL_TIMEOUT", "GOIS_LOCAL_CTX", "RENDER_API_KEY", "RENDER_SERVICE_ID")
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+ENV_SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASS", "PWD", "CREDENTIAL")
+ENV_VALUE_MAX = 4000
+
+
+def _env_is_secret(name: str) -> bool:
+    up = name.upper()
+    return any(h in up for h in ENV_SECRET_HINTS)
+
+
+def _env_preview(name: str, value) -> str:
+    """O painel nunca recebe o valor de uma variável sensível na listagem: só os últimos 3 caracteres (se for longa)."""
+    if value is None:
+        return "(gerado pelo Render)"
+    v = str(value)
+    if _env_is_secret(name):
+        return "••••••••" + (v[-3:] if len(v) > 12 else "")
+    return v if len(v) <= 80 else v[:79] + "…"
+
+
+def _render_http_error(code: int) -> str:
+    if code in (401, 403):
+        return "o Render recusou a RENDER_API_KEY (inválida ou sem permissão)"
+    if code == 404:
+        return "o Render não encontrou o serviço (confirma RENDER_SERVICE_ID)"
+    return f"o Render respondeu HTTP {code}"
+
+
+async def render_env_list() -> dict:
+    """Todas as variáveis do serviço no Render (GET /services/{id}/env-vars, paginado). Devolve {ok, vars:[{key,value}], detail}."""
+    token = os.environ.get("RENDER_API_KEY", "").strip()
+    service = os.environ.get("RENDER_SERVICE_ID", "").strip()
+    if not token or not service:
+        falta = "RENDER_API_KEY" if not token else "RENDER_SERVICE_ID"
+        return {"ok": False, "vars": [], "detail": f"falta {falta} no Render (Environment)"}
+    url = f"{RENDER_API}/services/{service}/env-vars"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    out, cursor = [], None
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
+            for _ in range(20):                                  # 20 páginas x 100 = tecto de segurança
+                params = {"limit": 100}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = await client.get(url, headers=headers, params=params)
+                if resp.status_code != 200:
+                    return {"ok": False, "vars": [], "detail": _render_http_error(resp.status_code)}
+                page = resp.json()
+                if not isinstance(page, list) or not page:
+                    break
+                for item in page:
+                    ev = item.get("envVar") if isinstance(item, dict) and isinstance(item.get("envVar"), dict) else item
+                    if isinstance(ev, dict) and ev.get("key"):
+                        out.append({"key": str(ev["key"]), "value": ev.get("value")})
+                last = page[-1]
+                cursor = last.get("cursor") if isinstance(last, dict) else None
+                if len(page) < 100 or not cursor:
+                    break
+    except Exception as e:
+        return {"ok": False, "vars": [], "detail": f"sem ligação à API do Render ({type(e).__name__})"}
+    return {"ok": True, "vars": out, "detail": ""}
+
+
+async def env_entries() -> dict:
+    """Lista para o painel. Com Render: TODAS as variáveis do serviço. Sem Render: só as do app (só leitura, exceto as chaves
+    dos fornecedores, que se podem pôr em memória)."""
+    provider_envs = {p["env"]: p["name"] for p in PROVIDERS}
+    rows, detail, sync = {}, "", render_sync_enabled()
+    if sync:
+        res = await render_env_list()
+        if res["ok"]:
+            for v in res["vars"]:
+                rows[v["key"]] = {"value": v["value"], "source": "render"}
+        else:
+            detail, sync = res["detail"], False
+    if not sync:
+        for name in ENV_KNOWN:
+            val = os.environ.get(name)
+            if val:
+                rows[name] = {"value": val, "source": "ambiente"}
+        detail = detail or ("falta RENDER_API_KEY / RENDER_SERVICE_ID no Render (Environment): só vês as variáveis do app e só "
+                            "as chaves dos fornecedores se podem mudar (ficam em memória até ao próximo reinício).")
+    for name in provider_envs:                                   # chave posta pelo painel só em memória (ainda não está no Render)
+        if name not in rows and RUNTIME_KEYS.get(name):
+            rows[name] = {"value": RUNTIME_KEYS[name], "source": "memória"}
+    out = [{"key": name, "preview": _env_preview(name, r["value"]), "secret": _env_is_secret(name), "source": r["source"],
+            "provider": provider_envs.get(name), "protected": name in ENV_PROTECTED,
+            "editable": sync or name in provider_envs} for name, r in sorted(rows.items())]
+    return {"render_sync": sync, "detail": detail, "vars": out, "suggestions": [n for n in ENV_KNOWN if n not in rows]}
+
+
+def _env_name(name: str) -> str:
+    name = str(name or "").strip()
+    if not ENV_NAME_RE.match(name):
+        raise HTTPException(400, "Nome inválido: só letras, números e _ (não pode começar por número; máximo 128 caracteres).")
+    return name
+
+
+async def env_apply(name: str, value: str, force: bool) -> dict:
+    """Cria/atualiza (value != "") ou remove (value == "") uma variável. Chaves de fornecedores seguem o caminho de /api/keys."""
+    prov = next((p for p in PROVIDERS if p["env"] == name), None)
+    if prov:
+        return dict(await apply_key(prov, value), key=name)
+    if name in ENV_PROTECTED and not force:
+        raise HTTPException(400, f"{name} é crítica (mexer nela pode tirar-te o acesso ao servidor): confirma no painel para continuar.")
+    if not render_sync_enabled():
+        raise HTTPException(400, "Para mexer em variáveis que não são chaves de fornecedores precisas de RENDER_API_KEY e "
+                                 "RENDER_SERVICE_ID no Render (Environment).")
+    res = await render_env_sync(name, value)
+    if not res["synced"]:
+        raise HTTPException(502, res["detail"])
+    if value:
+        os.environ[name] = value
+    else:
+        os.environ.pop(name, None)
+    return {"persisted": True, "action": "set" if value else "removed", "key": name, "render": res["detail"]}
+
+
+@app.get("/api/env")
+async def env_list(request: Request):
+    """Todas as variáveis de ambiente (valores sensíveis mascarados) + se a edição está ligada ao Render."""
+    await require_admin(request)
+    return await env_entries()
+
+
+@app.get("/api/env/{name}")
+async def env_reveal(name: str, request: Request):
+    """Valor completo de UMA variável (para o botão Editar). Só admin."""
+    await require_admin(request)
+    name = _env_name(name)
+    if render_sync_enabled():
+        res = await render_env_list()
+        if not res["ok"]:
+            raise HTTPException(502, res["detail"])
+        item = next((v for v in res["vars"] if v["key"] == name), None)
+        if item is not None:
+            return {"key": name, "value": item["value"] or ""}
+    if name in ENV_KNOWN and (RUNTIME_KEYS.get(name) or os.environ.get(name)):
+        return {"key": name, "value": RUNTIME_KEYS.get(name) or os.environ.get(name)}
+    raise HTTPException(404, f"A variável {name} não existe.")
+
+
+@app.put("/api/env/{name}")
+async def env_set(name: str, request: Request):
+    """Cria ou atualiza. Corpo: {"value": "...", "force"?: true}. «force» só é preciso nas variáveis críticas."""
+    await require_admin(request)
+    name = _env_name(name)
+    body = await _json_body(request)
+    value = body.get("value")
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(400, "value: não pode ficar vazio (para apagar usa remover).")
+    value = value.strip()
+    if len(value) > ENV_VALUE_MAX or "\x00" in value:
+        raise HTTPException(400, f"value: inválido (máximo {ENV_VALUE_MAX} caracteres, sem byte nulo).")
+    return await env_apply(name, value, bool(body.get("force")))
+
+
+@app.delete("/api/env/{name}")
+async def env_delete(name: str, request: Request):
+    """Remove (aqui e no Render). ?force=1 nas variáveis críticas."""
+    await require_admin(request)
+    name = _env_name(name)
+    force = str(request.query_params.get("force") or "").lower() in ("1", "true", "yes")
+    return await env_apply(name, "", force)
 
 
 @app.post("/api/classroom/learn")
