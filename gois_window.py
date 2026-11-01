@@ -2336,7 +2336,7 @@ class GoisWindow(tk.Tk):
                            + " · ".join(f"{k.replace('|', '/')} {self.fnum(v)}%" for k, v in sc.items() if k != "gois"))
             if b.get("missing"):
                 self.class_log("⚠ Sem resposta neste benchmark (nota antiga mantida, não renovada): "
-                               + ", ".join(m.replace("|", "/") for m in b["missing"]))
+                               + "; ".join(m.replace("|", "/") for m in b["missing"]))
             if isinstance(res.get("settings"), dict):
                 self.apply_settings(res["settings"])
             if then:
@@ -2367,7 +2367,7 @@ class GoisWindow(tk.Tk):
                 model = ids[0]
         except Exception as e:
             raise ApiError(f"LM Studio não responde em 127.0.0.1:{LM_PORT} ({e}). Abre o LM Studio e inicia o servidor local.")
-        system = "Tu és o gois.v1, um assistente técnico. Responde em português europeu, de forma rigorosa e concisa."
+        system = "Tu és o gois.v1, um assistente técnico. Responde em português europeu, de forma rigorosa e concisa, em no máximo 200 palavras."
         if context:
             system += "\n\nNotas úteis:\n" + context[:1200]
         body = json.dumps({"model": model, "temperature": 0.4, "max_tokens": 400, "stream": False,
