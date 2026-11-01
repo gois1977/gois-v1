@@ -9,9 +9,19 @@ ROTEAMENTO (novo na 6.1):
 COMPARAÇÃO (novo na 6.2): o gois.v1 é comparado com Mistral e Groq (campos mistral_ref / groq_ref).
   As notas antigas de Gemini / DeepSeek (gemini_ref / deepseek_ref) continuam guardadas, mas já não são medidas.
 
+DIRETRIZES GERIDAS (novo): as diretrizes do prompt (admin / público) já não são só leitura. Podes inserir, editar, remover e
+  reverter cada uma (GET/PUT /api/directives, POST /api/directives/{admin|public}, PUT|DELETE /api/directives/{âmbito}/{id},
+  POST .../{id}/revert e POST /api/directives/{âmbito}/revert). Ficam gravadas em gois_db.json.
+
+SKILLS NO DATASET (novo): /api/dataset junta SEMPRE as lições e as skills. As skills também se editam, revertem (versão anterior),
+  apagam (vão para o lixo e restauram-se) — PUT /api/skills/{id}, POST .../revert, POST .../restore, GET /api/skills/trash.
+
 Variáveis de ambiente (Render > Environment):
   GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY   (pelo menos uma)
   DATA_DIR           (opcional) pasta onde guardar gois_db.json
+  RENDER_API_KEY     (opcional) chave da API do Render (Account Settings > API Keys). Com ela, inserir / alterar / remover uma
+                     chave no painel atualiza também o Render > Environment (ver render_env_sync).
+  RENDER_SERVICE_ID  (opcional) «srv-...»; o Render já o define sozinho no serviço, só precisas dele fora do Render.
 
 Modelo próprio (LM Studio / qualquer servidor compatível com a API OpenAI):
   GOIS_LOCAL_URL         URL base do teu servidor, ex.: https://xxxx.trycloudflare.com/v1
@@ -491,11 +501,177 @@ DIRECTIVE_LABELS = {
 
 PROMPT_MAX_CHARS = 3000
 
+# --- Diretrizes geridas (inserir / editar / remover / reverter) -------------------------------------------------
+# As do código (ADMIN_DIRECTIVES / PUBLIC_DIRECTIVES) são o PADRÃO e têm id estável («admin-3», «public-2»).
+# Só quando mexes numa é que a lista do âmbito passa a ser guardada em DB_SETTINGS["directives"][âmbito]; enquanto
+# não mexeres, o servidor segue o código (por isso uma versão nova do app.py com diretrizes novas aplica-se sozinha).
+# Cada item: {id, base, text, reliability, finetune, note, test}; base = id da padrão de onde veio (None = criada por ti).
+# Reverter uma padrão repõe o texto/metadados do código (e volta a pô-la, se a tiveres removido).
+# O «texto livre» antigo (POST /api/prompts) continua a existir e, se estiver definido, SUBSTITUI a lista (ver active_prompt).
+DEFAULT_DIRECTIVES = {"admin": ADMIN_DIRECTIVES, "public": PUBLIC_DIRECTIVES}
+DIRECTIVE_SCOPES = ("admin", "public")
+DIRECTIVE_FIELDS = ("text", "reliability", "finetune", "note", "test")
+DIRECTIVE_FIELD_MAX = {"text": 1200, "note": 1500, "test": 600}
+
+
+def _default_directive(scope: str, n: int) -> dict:
+    """Diretriz padrão n (a contar de 1) do código."""
+    item = {k: DEFAULT_DIRECTIVES[scope][n - 1][k] for k in DIRECTIVE_FIELDS}
+    item.update(id=f"{scope}-{n}", base=f"{scope}-{n}")
+    return item
+
+
+def _default_directives(scope: str) -> list:
+    return [_default_directive(scope, n) for n in range(1, len(DEFAULT_DIRECTIVES[scope]) + 1)]
+
+
+def _base_number(scope: str, base) -> int:
+    """'admin-3' -> 3; 0 se não for uma diretriz padrão deste âmbito."""
+    m = re.fullmatch(re.escape(scope) + r"-(\d+)", str(base or ""))
+    n = int(m.group(1)) if m else 0
+    return n if 1 <= n <= len(DEFAULT_DIRECTIVES[scope]) else 0
+
+
+def directive_list(scope: str) -> list:
+    """Diretrizes em vigor: a lista gerida (se já mexeste nela) ou as padrão do código."""
+    managed = (DB_SETTINGS.get("directives") or {}).get(scope)
+    return managed if isinstance(managed, list) and managed else _default_directives(scope)
+
+
+def _clean_directive(body: dict, scope: str, current: dict = None) -> dict:
+    """Valida os campos. Com `current`, só muda o que vem no corpo (edição parcial). Levanta ValueError."""
+    out = dict(current) if current else {"reliability": "media", "finetune": "na" if scope == "public" else "nao",
+                                         "note": "", "test": ""}
+    for key in DIRECTIVE_FIELDS:
+        if key not in body:
+            continue
+        val = body[key]
+        val = "" if val is None else val
+        if not isinstance(val, str):
+            raise ValueError(f"{key}: tem de ser texto.")
+        val = val.strip()
+        if key in DIRECTIVE_LABELS and val not in DIRECTIVE_LABELS[key]:
+            raise ValueError(f"{key}: valores possíveis: {', '.join(DIRECTIVE_LABELS[key])}.")
+        if len(val) > DIRECTIVE_FIELD_MAX.get(key, 200):
+            raise ValueError(f"{key}: máximo {DIRECTIVE_FIELD_MAX.get(key, 200)} caracteres (tem {len(val)}).")
+        out[key] = val
+    if not str(out.get("text") or "").strip():
+        raise ValueError("text: a diretriz não pode ficar vazia.")
+    return out
+
+
+def _check_directives(scope: str, items: list) -> None:
+    if not items:
+        raise ValueError("Tem de ficar pelo menos uma diretriz (para voltar ao padrão usa «reverter»).")
+    n = len(" ".join(d["text"] for d in items))
+    if n > PROMPT_MAX_CHARS:
+        raise ValueError(f"As diretrizes {scope} somam {n} caracteres (máximo {PROMPT_MAX_CHARS}).")
+
+
+def _commit_directives(scope: str, items: list) -> None:
+    _check_directives(scope, items)
+    DB_SETTINGS.setdefault("directives", {})[scope] = items       # só grava se tudo for válido
+
+
+def _directive_index(items: list, did: str) -> int:
+    for i, d in enumerate(items):
+        if d.get("id") == did:
+            return i
+    raise LookupError(f"Diretriz «{did}» não encontrada.")
+
+
+def directive_insert(scope: str, body: dict) -> str:
+    """Insere uma diretriz nova (por defeito no fim; «position»: 1 = primeira). Devolve o id."""
+    items = [dict(d) for d in directive_list(scope)]
+    d = _clean_directive(body, scope)
+    d.update(id="c-" + uuid.uuid4().hex[:8], base=None)
+    pos = body.get("position")
+    if pos in (None, ""):
+        i = len(items)
+    else:
+        try:
+            i = max(0, min(len(items), int(pos) - 1))
+        except (TypeError, ValueError):
+            raise ValueError("position: tem de ser um número (1 = primeira).")
+    items.insert(i, d)
+    _commit_directives(scope, items)
+    return d["id"]
+
+
+def directive_edit(scope: str, did: str, body: dict) -> None:
+    items = [dict(d) for d in directive_list(scope)]
+    i = _directive_index(items, did)
+    items[i] = _clean_directive(body, scope, current=items[i])
+    _commit_directives(scope, items)
+
+
+def directive_remove(scope: str, did: str) -> None:
+    items = [dict(d) for d in directive_list(scope)]
+    del items[_directive_index(items, did)]
+    _commit_directives(scope, items)
+
+
+def directive_revert(scope: str, did: str) -> None:
+    """Repõe UMA diretriz padrão (editada ou removida) como está no código."""
+    items = [dict(d) for d in directive_list(scope)]
+    n = _base_number(scope, did)
+    i = next((k for k, d in enumerate(items) if d.get("id") == did), None)
+    if not n:
+        if i is None:
+            raise LookupError(f"Diretriz «{did}» não encontrada.")
+        raise ValueError("Esta diretriz foi criada por ti: não tem padrão para repor (edita-a ou remove-a).")
+    if i is not None:
+        items[i] = _default_directive(scope, n)
+    else:                                                # estava removida: volta à posição que lhe corresponde
+        pos = 0
+        for k, d in enumerate(items):
+            if 0 < _base_number(scope, d.get("base")) < n:
+                pos = k + 1
+        items.insert(pos, _default_directive(scope, n))
+    _commit_directives(scope, items)
+
+
+def directive_revert_scope(scope: str) -> None:
+    """Repõe TODAS as diretrizes do âmbito: apaga as criadas e volta ao que está no código.
+    Não mexe no «texto livre» (POST /api/prompts): esse repõe-se à parte, com {âmbito: ""}."""
+    (DB_SETTINGS.get("directives") or {}).pop(scope, None)
+
+
+def directives_import(body: dict) -> None:
+    """Repõe as listas a partir de uma cópia (o que GET /api/directives devolve em «directives_state»).
+    Útil se o disco do servidor for efémero e perder gois_db.json. Valida tudo antes de gravar."""
+    staged = {}
+    for scope in DIRECTIVE_SCOPES:
+        if scope not in body:
+            continue
+        raw = body[scope]
+        if not isinstance(raw, list):
+            raise ValueError(f"{scope}: tem de ser uma lista.")
+        items, used = [], set()
+        for r in raw:
+            if not isinstance(r, dict):
+                raise ValueError(f"{scope}: cada diretriz tem de ser um objeto.")
+            d = _clean_directive(r, scope)
+            n = _base_number(scope, r.get("base"))
+            if n:
+                d.update(id=f"{scope}-{n}", base=f"{scope}-{n}")
+            else:
+                rid = str(r.get("id") or "")
+                d.update(id=rid if rid.startswith("c-") and rid not in used else "c-" + uuid.uuid4().hex[:8], base=None)
+            if d["id"] in used:
+                raise ValueError(f"{scope}: diretriz repetida ({d['id']}).")
+            used.add(d["id"])
+            items.append(d)
+        _check_directives(scope, items)
+        staged[scope] = items
+    DB_SETTINGS.setdefault("directives", {}).update(staged)
+
 
 def active_prompt(is_admin: bool) -> str:
-    """Diretriz em vigor: a editada no painel (se existir) ou o padrão do código."""
-    custom = str((DB_SETTINGS.get("prompts") or {}).get("admin" if is_admin else "public") or "").strip()
-    return custom or (ADMIN_PROMPT if is_admin else PUBLIC_PROMPT)
+    """Prompt em vigor: o texto livre do painel (se existir) ou as diretrizes (geridas ou padrão do código) coladas."""
+    scope = "admin" if is_admin else "public"
+    custom = str((DB_SETTINGS.get("prompts") or {}).get(scope) or "").strip()
+    return custom or " ".join(d["text"] for d in directive_list(scope))
 
 
 def apply_prompt_update(body: dict, store: dict, max_chars: int = PROMPT_MAX_CHARS) -> None:
@@ -515,13 +691,32 @@ def apply_prompt_update(body: dict, store: dict, max_chars: int = PROMPT_MAX_CHA
     store.update(updates)          # só grava se tudo for válido
 
 
+def _directive_origin(scope: str, d: dict) -> str:
+    n = _base_number(scope, d.get("base"))
+    if not n:
+        return "criada"
+    default = DEFAULT_DIRECTIVES[scope][n - 1]
+    return "padrão" if all(d.get(k) == default[k] for k in DIRECTIVE_FIELDS) else "editada"
+
+
+def removed_directives(scope: str) -> list:
+    """Diretrizes padrão que removeste (podes repô-las com «reverter»)."""
+    present = {_base_number(scope, d.get("base")) for d in directive_list(scope)}
+    return [{"id": f"{scope}-{n}", "text": DEFAULT_DIRECTIVES[scope][n - 1]["text"]}
+            for n in range(1, len(DEFAULT_DIRECTIVES[scope]) + 1) if n not in present]
+
+
 def directives_view(is_admin: bool) -> list:
-    """Estado de cada diretriz PADRÃO para o painel (os metadados nunca vão para o modelo)."""
+    """Estado de cada diretriz para o painel (os metadados nunca vão para o modelo)."""
+    scope = "admin" if is_admin else "public"
+    override = bool(str((DB_SETTINGS.get("prompts") or {}).get(scope) or "").strip())
     out = []
-    for i, d in enumerate(ADMIN_DIRECTIVES if is_admin else PUBLIC_DIRECTIVES, 1):
-        out.append({"n": i, "text": d["text"], "in_force": "✅ Em vigor",
-                    "reliability": DIRECTIVE_LABELS["reliability"][d["reliability"]],
-                    "finetune": DIRECTIVE_LABELS["finetune"][d["finetune"]],
+    for i, d in enumerate(directive_list(scope), 1):
+        out.append({"n": i, "id": d["id"], "text": d["text"], "origin": _directive_origin(scope, d),
+                    "in_force": "⏸ Substituída pelo texto livre" if override else "✅ Em vigor",
+                    "reliability": DIRECTIVE_LABELS["reliability"].get(d["reliability"], d["reliability"]),
+                    "finetune": DIRECTIVE_LABELS["finetune"].get(d["finetune"], d["finetune"]),
+                    "reliability_key": d["reliability"], "finetune_key": d["finetune"],
                     "note": d["note"], "test": d["test"]})
     return out
 
@@ -535,8 +730,12 @@ def prompt_cost() -> dict:
 
 def prompts_view() -> dict:
     store = DB_SETTINGS.setdefault("prompts", {"admin": "", "public": ""})
+    managed = DB_SETTINGS.get("directives") or {}
     return {"admin": active_prompt(True), "public": active_prompt(False),
             "admin_directives": directives_view(True), "public_directives": directives_view(False), "cost": prompt_cost(),
+            "admin_removed": removed_directives("admin"), "public_removed": removed_directives("public"),
+            "admin_managed": "admin" in managed, "public_managed": "public" in managed,
+            "directives_state": {s: [dict(d) for d in directive_list(s)] for s in DIRECTIVE_SCOPES},
             "admin_default": ADMIN_PROMPT, "public_default": PUBLIC_PROMPT,
             "admin_custom": bool(str(store.get("admin") or "").strip()),
             "public_custom": bool(str(store.get("public") or "").strip()),
@@ -858,6 +1057,36 @@ def build_dataset_rows(lessons, min_chars: int = 200):
     return rows, skipped
 
 
+def build_skill_rows(skills, min_chars: int = 40):
+    """Skills -> exemplos de afinação (mesmo formato das lições). Devolve (linhas, ignoradas)."""
+    rows, seen, skipped = [], set(), 0
+    for s in skills:
+        title = str(s.get("title") or "").strip()
+        body = str(s.get("content") or "").strip()
+        key = title.lower()
+        if not title or len(body) < min_chars or key in seen:
+            skipped += 1
+            continue
+        seen.add(key)
+        kind = str(s.get("type") or "SKILL").strip().lower() or "skill"
+        rows.append({"messages": [
+            {"role": "system", "content": DATASET_SYSTEM},
+            {"role": "user", "content": f"Explica «{title}» ({kind} do gois.v1): para que serve e como aplicar."},
+            {"role": "assistant", "content": body},
+        ]})
+    return rows, skipped
+
+
+def build_full_dataset():
+    """Dataset de afinação = lições + skills. As skills entram SEMPRE: não há interruptor para as deixar de fora.
+    Devolve (linhas, resumo)."""
+    lrows, lskip = build_dataset_rows(DB_KNOWLEDGE)
+    srows, sskip = build_skill_rows(DB_SKILLS)
+    info = {"count": len(lrows) + len(srows), "skipped": lskip + sskip,
+            "lessons": len(lrows), "skills": len(srows), "skipped_lessons": lskip, "skipped_skills": sskip}
+    return lrows + srows, info
+
+
 TEACHER_SYSTEM = "És o sistema de ensino interno do gois.v1. Produz conteúdos técnicos avançados e práticos."
 
 
@@ -1162,6 +1391,8 @@ def settings_view() -> dict:
     tracked_models()
     recompute_comparison()
     view = dict(DB_SETTINGS)
+    view.pop("skills_trash", None)      # têm endpoints próprios (/api/skills/trash, /api/directives)
+    view.pop("directives", None)
     view["providers_with_key"] = [p["name"] for p in get_providers("public") if candidate_keys(p)]
     view["own_model_only"] = False          # já não é um interruptor global: ver admin_uses_own_model
     view["admin_uses_own_model"] = True     # admin -> só o teu modelo
@@ -1358,12 +1589,95 @@ async def set_prompts(request: Request):
 
 @app.get("/api/dataset")
 async def get_dataset(request: Request):
-    """Dataset de afinação gerado a partir das lições (admin). ?count=1 devolve só os totais."""
+    """Dataset de afinação gerado a partir das lições E das skills (admin). ?count=1 devolve só os totais."""
     await require_admin(request)
-    rows, skipped = build_dataset_rows(DB_KNOWLEDGE)
+    rows, info = build_full_dataset()
     if request.query_params.get("count"):
-        return {"count": len(rows), "skipped": skipped}
-    return {"count": len(rows), "skipped": skipped, "examples": rows}
+        return info
+    return dict(info, examples=rows)
+
+
+# --- Diretrizes: inserir / editar / remover / reverter ------------------------------------------------------------
+def _dir_scope(scope: str) -> str:
+    if scope not in DIRECTIVE_SCOPES:
+        raise HTTPException(404, "Âmbito inválido: usa «admin» ou «public».")
+    return scope
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Corpo inválido.")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Corpo inválido.")
+    return body
+
+
+def _managed_call(fn, *args):
+    """Corre uma operação de gestão (diretriz/skill), grava e traduz os erros para HTTP."""
+    try:
+        res = fn(*args)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    save_db()
+    return res
+
+
+@app.get("/api/directives")
+async def get_directives(request: Request):
+    """Diretrizes em vigor + removidas + «directives_state» (cópia para guardar e repor com PUT)."""
+    await require_admin(request)
+    return prompts_view()
+
+
+@app.put("/api/directives")
+async def put_directives(request: Request):
+    """Repõe as listas a partir de {"admin": [...], "public": [...]} (formato de «directives_state»)."""
+    await require_admin(request)
+    _managed_call(directives_import, await _json_body(request))
+    return prompts_view()
+
+
+@app.post("/api/directives/{scope}")
+async def add_directive(scope: str, request: Request):
+    """Insere. Corpo: {"text": "...", "position"?: 1, "reliability"?, "finetune"?, "note"?, "test"?}."""
+    await require_admin(request)
+    did = _managed_call(directive_insert, _dir_scope(scope), await _json_body(request))
+    return dict(prompts_view(), id=did)
+
+
+@app.put("/api/directives/{scope}/{did}")
+async def edit_directive(scope: str, did: str, request: Request):
+    """Edita (parcial): só muda os campos que enviares."""
+    await require_admin(request)
+    _managed_call(directive_edit, _dir_scope(scope), did, await _json_body(request))
+    return prompts_view()
+
+
+@app.delete("/api/directives/{scope}/{did}")
+async def delete_directive(scope: str, did: str, request: Request):
+    await require_admin(request)
+    _managed_call(directive_remove, _dir_scope(scope), did)
+    return prompts_view()
+
+
+@app.post("/api/directives/{scope}/revert")
+async def revert_directives(scope: str, request: Request):
+    """Repõe TODAS as diretrizes do âmbito para as do código (apaga as criadas)."""
+    await require_admin(request)
+    _managed_call(directive_revert_scope, _dir_scope(scope))
+    return prompts_view()
+
+
+@app.post("/api/directives/{scope}/{did}/revert")
+async def revert_directive(scope: str, did: str, request: Request):
+    """Repõe UMA diretriz padrão (editada ou removida)."""
+    await require_admin(request)
+    _managed_call(directive_revert, _dir_scope(scope), did)
+    return prompts_view()
 
 
 @app.post("/api/sync/import")
@@ -1383,22 +1697,125 @@ async def sync_import(request: Request):
     return {"imported": added, "total": len(DB_KNOWLEDGE)}
 
 
+SKILL_HISTORY_MAX = 10      # versões anteriores guardadas por skill (para «reverter»)
+SKILL_TRASH_MAX = 50        # skills apagadas que ainda se podem restaurar
+
+
+def _norm_title(title) -> str:
+    return str(title or "").strip().lower()
+
+
+def _skill_trash() -> list:
+    return DB_SETTINGS.setdefault("skills_trash", [])
+
+
+def _skill_by_id(sid: str) -> dict:
+    for s in DB_SKILLS:
+        if s.get("id") == sid:
+            return s
+    raise LookupError("Skill não encontrada.")
+
+
+def _skill_title_taken(title: str, ignore_id: str = None) -> bool:
+    low = _norm_title(title)
+    return any(s.get("id") != ignore_id and _norm_title(s.get("title")) == low for s in DB_SKILLS)
+
+
+def skill_public(s: dict) -> dict:
+    """A skill sem o histórico (só o número de versões anteriores)."""
+    out = {k: v for k, v in s.items() if k != "history"}
+    out["versions"] = len(s.get("history") or [])
+    return out
+
+
 @app.get("/api/skills")
 async def get_skills(request: Request):
     await require_admin(request)
-    return DB_SKILLS
+    return [skill_public(s) for s in DB_SKILLS]
 
 
-def _add_skill(body: dict) -> bool:
+@app.get("/api/skills/trash")
+async def get_skills_trash(request: Request):
+    """Skills apagadas que ainda se podem restaurar (POST /api/skills/{id}/restore)."""
+    await require_admin(request)
+    return [skill_public(s) for s in _skill_trash()]
+
+
+def _add_skill(body: dict, respect_trash: bool = False) -> bool:
     title = str(body.get("title", "")).strip()
-    if not title:
+    if not title or _skill_title_taken(title):
         return False
+    trash = _skill_trash()
+    trashed = [t for t in trash if _norm_title(t.get("title")) == _norm_title(title)]
+    if trashed:
+        if respect_trash:
+            return False        # apagada de propósito: a sincronização do cliente não a ressuscita
+        trash[:] = [t for t in trash if t not in trashed]      # criaste-a de novo: já não faz sentido restaurar a antiga
     sid = skill_id(title)
     if any(s.get("id") == sid for s in DB_SKILLS):
-        return False
+        sid = uuid.uuid4().hex[:12]
     DB_SKILLS.append({"id": sid, "type": str(body.get("type") or "SKILL"), "title": title,
                       "content": str(body.get("content", ""))})
     return True
+
+
+def skill_edit(sid: str, body: dict) -> dict:
+    """Edita type/title/content (parcial). Guarda a versão anterior para «reverter»."""
+    s = _skill_by_id(sid)
+    new = {k: s.get(k, "") for k in ("type", "title", "content")}
+    for k in new:
+        if k in body:
+            if not isinstance(body[k], str):
+                raise ValueError(f"{k}: tem de ser texto.")
+            new[k] = body[k].strip()
+    new["type"] = new["type"] or "SKILL"
+    if not new["title"]:
+        raise ValueError("title: não pode ficar vazio.")
+    if _skill_title_taken(new["title"], ignore_id=sid):
+        raise ValueError("Já existe outra skill com esse título.")
+    if all(new[k] == s.get(k, "") for k in new):
+        return s
+    hist = s.setdefault("history", [])
+    hist.append(dict({k: s.get(k, "") for k in new}, at=now_iso()))
+    del hist[:-SKILL_HISTORY_MAX]
+    s.update(new)
+    return s
+
+
+def skill_revert(sid: str) -> dict:
+    """Volta à versão anterior à última edição (chama-se várias vezes para recuar mais)."""
+    s = _skill_by_id(sid)
+    hist = s.get("history") or []
+    if not hist:
+        raise ValueError("Esta skill não tem versões anteriores.")
+    prev = hist[-1]
+    if _skill_title_taken(prev["title"], ignore_id=sid):
+        raise ValueError("Já existe outra skill com o título da versão anterior.")
+    hist.pop()
+    s.update(type=prev["type"], title=prev["title"], content=prev["content"])
+    return s
+
+
+def skill_delete(sid: str) -> None:
+    """Apaga: vai para o lixo (restaurável) e a sincronização do cliente deixa de a repor."""
+    s = _skill_by_id(sid)
+    DB_SKILLS.remove(s)
+    trash = _skill_trash()
+    trash.append(dict(s, deleted=now_iso()))
+    del trash[:-SKILL_TRASH_MAX]
+
+
+def skill_restore(sid: str) -> dict:
+    trash = _skill_trash()
+    entry = next((t for t in trash if t.get("id") == sid), None)
+    if entry is None:
+        raise LookupError("Skill não encontrada no lixo.")
+    if _skill_title_taken(entry.get("title", "")):
+        raise ValueError("Já existe uma skill com esse título: edita ou apaga essa primeiro.")
+    trash.remove(entry)
+    entry.pop("deleted", None)
+    DB_SKILLS.append(entry)
+    return entry
 
 
 @app.post("/api/skills")
@@ -1413,18 +1830,105 @@ async def add_skill(request: Request):
 async def add_skills_bulk(request: Request):
     await require_admin(request)
     body = await request.json()
-    n = sum(1 for s in body.get("skills", []) if isinstance(s, dict) and _add_skill(s))
+    n = sum(1 for s in body.get("skills", []) if isinstance(s, dict) and _add_skill(s, respect_trash=True))
     save_db()
     return {"success": True, "added": n, "total": len(DB_SKILLS)}
+
+
+@app.put("/api/skills/{sid}")
+async def edit_skill(sid: str, request: Request):
+    """Edita (parcial): {"title"?, "type"?, "content"?}. Guarda a versão anterior."""
+    await require_admin(request)
+    return skill_public(_managed_call(skill_edit, sid, await _json_body(request)))
+
+
+@app.post("/api/skills/{sid}/revert")
+async def revert_skill(sid: str, request: Request):
+    await require_admin(request)
+    return skill_public(_managed_call(skill_revert, sid))
+
+
+@app.post("/api/skills/{sid}/restore")
+async def restore_skill(sid: str, request: Request):
+    await require_admin(request)
+    return skill_public(_managed_call(skill_restore, sid))
 
 
 @app.delete("/api/skills/{sid}")
 async def delete_skill(sid: str, request: Request):
     await require_admin(request)
-    before = len(DB_SKILLS)
-    DB_SKILLS[:] = [s for s in DB_SKILLS if s.get("id") != sid]
+    try:
+        skill_delete(sid)
+    except LookupError:
+        return {"success": False}
     save_db()
-    return {"success": len(DB_SKILLS) < before}
+    return {"success": True}
+
+
+RENDER_API = "https://api.render.com/v1"
+
+
+def render_sync_enabled() -> bool:
+    return bool(os.environ.get("RENDER_API_KEY", "").strip() and os.environ.get("RENDER_SERVICE_ID", "").strip())
+
+
+async def render_env_sync(name: str, value: str) -> dict:
+    """Espelha uma variável no Render > Environment: value != "" cria/atualiza; value == "" apaga.
+    Usa o endpoint de UMA variável (PUT/DELETE /services/{id}/env-vars/{chave}); o PUT em /env-vars substituiria TODAS.
+    Nunca levanta exceção nem regista o valor: devolve {"synced": bool, "detail": str}."""
+    token = os.environ.get("RENDER_API_KEY", "").strip()
+    service = os.environ.get("RENDER_SERVICE_ID", "").strip()
+    if not token or not service:
+        falta = "RENDER_API_KEY" if not token else "RENDER_SERVICE_ID"
+        return {"synced": False, "detail": f"falta {falta} no Render (Environment): a chave só ficou em memória"}
+    url = f"{RENDER_API}/services/{service}/env-vars/{name}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
+            if value:
+                resp = await client.put(url, json={"value": value}, headers=headers)
+            else:
+                resp = await client.delete(url, headers=headers)
+    except Exception as e:
+        return {"synced": False, "detail": f"sem ligação à API do Render ({type(e).__name__})"}
+    code = resp.status_code
+    if code in (200, 201, 204) or (not value and code == 404):      # apagar o que já não existe também é sucesso
+        return {"synced": True, "detail": f"{name} {'atualizada' if value else 'removida'} no Render"}
+    if code in (401, 403):
+        return {"synced": False, "detail": "o Render recusou a RENDER_API_KEY (inválida ou sem permissão)"}
+    if code == 404:
+        return {"synced": False, "detail": "o Render não encontrou o serviço (confirma RENDER_SERVICE_ID)"}
+    logger.warning("Render env-vars %s %s -> HTTP %s", "PUT" if value else "DELETE", name, code)
+    return {"synced": False, "detail": f"o Render respondeu HTTP {code}"}
+
+
+def _provider_def(provider: str) -> dict:
+    for p in PROVIDERS:
+        if p["name"].lower() == str(provider or "").strip().lower():
+            return p
+    raise HTTPException(404, "Fornecedor desconhecido.")
+
+
+async def apply_key(p: dict, key: str) -> dict:
+    """Aplica já no servidor (vale no pedido seguinte) e espelha no Render. key == "" remove."""
+    if len(key) > 500 or any(c in key for c in "\r\n\x00"):
+        raise HTTPException(400, "Chave inválida (uma linha, até 500 caracteres).")
+    env = p["env"]
+    if key:
+        RUNTIME_KEYS[env] = key
+    else:
+        RUNTIME_KEYS.pop(env, None)
+    res = await render_env_sync(env, key)
+    if res["synced"]:
+        # O Render grava a variável; atualizamos também este processo para não depender de um redeploy.
+        if key:
+            os.environ[env] = key
+        else:
+            os.environ.pop(env, None)
+    elif not key:
+        os.environ.pop(env, None)      # remover vale já, mesmo que o Render não tenha sido alcançado
+    return {"persisted": res["synced"], "action": "set" if key else "removed", "provider": p["name"],
+            "render": res["detail"]}
 
 
 @app.get("/api/keys/status")
@@ -1436,7 +1940,7 @@ async def keys_status(request: Request):
         run_set = bool(RUNTIME_KEYS.get(p["env"], "").strip())
         status[p["name"]] = {"configured": env_set or run_set,
                              "source": "environment" if env_set else ("runtime" if run_set else ""),
-                             "model": p["models"][0]}
+                             "model": p["models"][0], "render_sync": render_sync_enabled()}
     return status
 
 
@@ -1444,13 +1948,16 @@ async def keys_status(request: Request):
 async def set_key(request: Request):
     await require_admin(request)
     body = await request.json()
-    provider = str(body.get("provider", ""))
-    key = str(body.get("key", "")).strip()
-    for p in PROVIDERS:
-        if p["name"].lower() == provider.lower():
-            RUNTIME_KEYS[p["env"]] = key
-            return {"persisted": False}
-    raise HTTPException(404, "Fornecedor desconhecido.")
+    p = _provider_def(body.get("provider", ""))
+    key = str(body.get("key", "")).strip()          # chave vazia = remover
+    return await apply_key(p, key)
+
+
+@app.delete("/api/keys/{provider}")
+async def delete_key(provider: str, request: Request):
+    """Remove a chave do fornecedor (aqui e, se houver RENDER_API_KEY, no Render > Environment)."""
+    await require_admin(request)
+    return await apply_key(_provider_def(provider), "")
 
 
 @app.post("/api/classroom/learn")
