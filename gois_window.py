@@ -1059,13 +1059,29 @@ class GoisWindow(tk.Tk):
                 return
 
             def done(res, err):
-                info.config(text=f"❌ {err}" if err else "✅ Enviada. Fica só em memória no servidor — para ser permanente define-a em Render > Environment.")
+                info.config(text=f"❌ {err}" if err else key_result(res, "Enviada"))
                 if not err:
                     e_key.delete(0, tk.END)
 
-            self.bg(lambda: self.api.call("POST", "/api/keys", {"provider": prov.get(), "key": k}), done)
+            self.bg(lambda: self.api.call("POST", "/api/keys", {"provider": prov.get(), "key": k}, timeout=45), done)
+
+        def key_result(res, verb):
+            """Diz a verdade sobre onde ficou: Render (permanente) ou só memória do servidor."""
+            if res.get("persisted"):
+                return f"✅ {verb} e gravada no Render > Environment ({res.get('render', '')})."
+            return f"✅ {verb}, mas só em memória no servidor: {res.get('render', 'sem detalhe')}."
+
+        def remove_key():
+            if not messagebox.askyesno("Remover chave", f"Remover a chave {prov.get()} do servidor e do Render > Environment?", parent=win):
+                return
+
+            def done(res, err):
+                info.config(text=f"❌ {err}" if err else key_result(res, "Removida"))
+
+            self.bg(lambda: self.api.call("DELETE", f"/api/keys/{prov.get()}", timeout=45), done)
 
         self.btn(frm, "Enviar", send_key, THEME["accent_blue"]).pack(side=tk.LEFT)
+        self.btn(frm, "🗑 Remover", remove_key).pack(side=tk.LEFT, padx=(6, 0))
 
         def show_status():
             def done(res, err):
