@@ -1040,8 +1040,11 @@ def parse_lesson(text: str, cat: str):
 DATASET_SYSTEM = "Tu és o gois.v1, um assistente técnico. Responde em português europeu, de forma direta e completa."
 
 
-def build_dataset_rows(lessons, min_chars: int = 200):
-    """Lições da Sala de Aula -> exemplos de afinação (formato chat). Devolve (linhas, ignoradas)."""
+def build_dataset_rows(lessons, min_chars: int = 200, system: str = "", why: dict = None):
+    """Lições da Sala de Aula -> exemplos de afinação (formato chat). Devolve (linhas, ignoradas).
+    why (opcional) conta os motivos: sem_titulo / curta / repetida."""
+    system = system or DATASET_SYSTEM
+    why = why if why is not None else {}
     rows, seen, skipped = [], set(), 0
     for k in lessons:
         title = str(k.get("title") or "").strip()
@@ -1049,20 +1052,24 @@ def build_dataset_rows(lessons, min_chars: int = 200):
         key = title.lower()
         if not title or len(body) < min_chars or key in seen:
             skipped += 1
+            motivo = "sem_titulo" if not title else ("curta" if len(body) < min_chars else "repetida")
+            why[motivo] = why.get(motivo, 0) + 1
             continue
         seen.add(key)
         cat = str(k.get("category") or "").strip()
         question = f"Explica em detalhe e com exemplos práticos: {title}" + (f" (área: {cat})" if cat else "")
         rows.append({"messages": [
-            {"role": "system", "content": DATASET_SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": question},
             {"role": "assistant", "content": body},
         ]})
     return rows, skipped
 
 
-def build_skill_rows(skills, min_chars: int = 40):
+def build_skill_rows(skills, min_chars: int = 40, system: str = "", why: dict = None):
     """Skills -> exemplos de afinação (mesmo formato das lições). Devolve (linhas, ignoradas)."""
+    system = system or DATASET_SYSTEM
+    why = why if why is not None else {}
     rows, seen, skipped = [], set(), 0
     for s in skills:
         title = str(s.get("title") or "").strip()
@@ -1070,11 +1077,13 @@ def build_skill_rows(skills, min_chars: int = 40):
         key = title.lower()
         if not title or len(body) < min_chars or key in seen:
             skipped += 1
+            motivo = "sem_titulo" if not title else ("curta" if len(body) < min_chars else "repetida")
+            why[motivo] = why.get(motivo, 0) + 1
             continue
         seen.add(key)
         kind = str(s.get("type") or "SKILL").strip().lower() or "skill"
         rows.append({"messages": [
-            {"role": "system", "content": DATASET_SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": f"Explica «{title}» ({kind} do gois.v1): para que serve e como aplicar."},
             {"role": "assistant", "content": body},
         ]})
@@ -1082,13 +1091,24 @@ def build_skill_rows(skills, min_chars: int = 40):
 
 
 def build_full_dataset():
-    """Dataset de afinação = lições + skills. As skills entram SEMPRE: não há interruptor para as deixar de fora.
-    Devolve (linhas, resumo)."""
-    lrows, lskip = build_dataset_rows(DB_KNOWLEDGE)
-    srows, sskip = build_skill_rows(DB_SKILLS)
-    info = {"count": len(lrows) + len(srows), "skipped": lskip + sskip,
-            "lessons": len(lrows), "skills": len(srows), "skipped_lessons": lskip, "skipped_skills": sskip}
-    return lrows + srows, info
+    """Dataset de afinação = lições + skills + diretrizes em vigor. Tudo entra SEMPRE: não há interruptor para deixar algo de fora.
+    Cada exemplo leva como «system» a diretriz de admin ATUAL (a editada no painel ou a padrão), por isso o modelo é treinado
+    já com as regras que vai receber em produção; e há um exemplo em que ele recita as próprias diretrizes.
+    Devolve (linhas, resumo); o resumo diz também PORQUE é que cada item foi ignorado."""
+    system = (active_prompt(True) or DATASET_SYSTEM).strip()
+    lwhy, swhy = {}, {}
+    lrows, lskip = build_dataset_rows(DB_KNOWLEDGE, system=system, why=lwhy)
+    srows, sskip = build_skill_rows(DB_SKILLS, system=system, why=swhy)
+    drows = []
+    if system and system != DATASET_SYSTEM:
+        drows.append({"messages": [{"role": "system", "content": system},
+                                   {"role": "user", "content": "Quais são as tuas diretrizes de funcionamento?"},
+                                   {"role": "assistant", "content": system}]})
+    info = {"count": len(lrows) + len(srows) + len(drows), "skipped": lskip + sskip,
+            "lessons": len(lrows), "skills": len(srows), "directives": len(drows),
+            "skipped_lessons": lskip, "skipped_skills": sskip,
+            "skipped_why": {"lessons": lwhy, "skills": swhy}}
+    return lrows + srows + drows, info
 
 
 TEACHER_SYSTEM = "És o sistema de ensino interno do gois.v1. Produz conteúdos técnicos avançados e práticos."
