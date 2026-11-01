@@ -103,6 +103,33 @@ def blend(c1, c2, a):
         return c1
 
 
+BENCH_GREEN = "#22c55e"      # verde vivo, igual nos dois temas: marca os modelos que estão a fazer benchmark agora
+
+
+class BenchDot(tk.Canvas):
+    """Círculo verde com anel a pulsar. Só aparece nos modelos que estão a fazer benchmark neste momento; fora disso fica invisível."""
+
+    def __init__(self, master, bg, size=18):
+        super().__init__(master, width=size, height=size, bg=bg, highlightthickness=0, bd=0)
+        self.bgc, self.size, self.on = bg, size, False
+
+    def set(self, on):
+        on = bool(on)
+        if on != self.on:
+            self.on = on
+            self.draw(0)
+
+    def draw(self, t):
+        self.delete("all")
+        if not self.on:
+            return
+        c = self.size / 2
+        p = (t * 1.1) % 1.0
+        r = 5 + 3.5 * p
+        self.create_oval(c - r, c - r, c + r, c + r, outline=blend(BENCH_GREEN, self.bgc, 1 - p), width=2)
+        self.create_oval(c - 5, c - 5, c + 5, c + 5, fill=BENCH_GREEN, outline="")
+
+
 class StatusLamp(tk.Canvas):
     """Indicador animado: bolinha com anel a pulsar, 'respiração' lenta, spinner ou círculo com número, mais texto."""
 
@@ -625,7 +652,9 @@ class GoisWindow(tk.Tk):
         self.history = hist if isinstance(hist, list) else []      # (antigo, já não usado no gráfico: vem do servidor)
         sm = self.cfg.get("sel_models")
         self.sel_models = {p: (sm.get(p) if isinstance(sm, dict) else None) for p in MODEL_PROVIDER.values()}
-        self.provider_models = {}          # lista real de modelos por fornecedor (GET /api/provider-models)
+        self.provider_models = {}          # lista real de modelos por fornecedor (GET /api/provider-models), já ordenada por força online
+        self._pm_last = 0.0                # quando foi pedida a última lista de modelos
+        self._bench_sig = None             # quem está a fazer benchmark (para redesenhar só quando muda)
         set_model_labels(self.sel_models)
         self.kb = []
         self.class_busy = False
@@ -854,8 +883,15 @@ class GoisWindow(tk.Tk):
             tk.Frame(f, bg=color, width=4).pack(side=tk.LEFT, fill=tk.Y)
         body = tk.Frame(f, bg=THEME["panel"])
         body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tl = tk.Label(body, text=title, fg=THEME["muted"], bg=THEME["panel"], font=(FONT_UI_B, 9))
-        tl.pack(anchor=tk.W, padx=14, pady=(10, 0))
+        trow = tk.Frame(body, bg=THEME["panel"])
+        trow.pack(anchor=tk.W, fill=tk.X, padx=14, pady=(10, 0))
+        tl = tk.Label(trow, text=title, fg=THEME["muted"], bg=THEME["panel"], font=(FONT_UI_B, 9))
+        tl.pack(side=tk.LEFT)
+        if key in MODEL_FIELD:                      # círculo verde: este modelo está a fazer benchmark agora
+            dot = BenchDot(trow, THEME["panel"])
+            dot.pack(side=tk.LEFT, padx=(6, 0))
+            self.lamps.append(dot)
+            self.kpi_dots[key] = dot
         self.kpi_title[key] = tl
         val = tk.Label(body, text="—", fg=THEME["fg"], bg=THEME["panel"], font=(FONT_SERIF, 26 if big else 17))
         val.pack(anchor=tk.W, padx=14)
@@ -1042,6 +1078,8 @@ class GoisWindow(tk.Tk):
         self.kpi = {}
         self.kpi_status = {}
         self.kpi_title = {}
+        self.kpi_dots = {}
+        self.pick_dots = {}
         self.kpi_frames = {}
         self.side_bars = {}
         self.nav_rows = []
@@ -2349,35 +2387,54 @@ class GoisWindow(tk.Tk):
             self.open_model_menu(MODEL_PROVIDER[key], ev.widget)
 
     def provider_rows(self, prov):
-        """[(id, tracked, avg, n, at)] — da lista real do fornecedor (se já vier) + tudo o que está em medição / já medido."""
+        """[(id, tracked, avg, n, at, força, fonte, benchmarking)] — SEMPRE do mais forte ao mais fraco pela classificação ONLINE
+        (o servidor ordena; os teus benchmarks não mexem na ordem). Os ids que o servidor ainda não listou vão para o fim."""
         comp = self.server_settings.get("comparison") or {}
         summ = comp.get("models_summary") or {}
         tracked = (self.server_settings.get("tracked_models") or {}).get(prov) or []
         info = self.provider_models.get(prov) or {}
-        ids = {m["id"] for m in info.get("models", [])} | set(tracked) | {k.split("|", 1)[1] for k in summ if k.startswith(prov + "|")}
-        rows = []
-        for m in ids:
+        rows, seen = [], set()
+        for m in info.get("models", []):
+            v = summ.get(mkey(prov, m["id"])) or {}
+            seen.add(m["id"])
+            rows.append((m["id"], m["id"] in tracked, v.get("avg"), v.get("n", 0), v.get("at") or "",
+                         m.get("strength"), m.get("strength_src") or "", bool(m.get("benchmarking"))))
+        extra = ({k.split("|", 1)[1] for k in summ if k.startswith(prov + "|")} | set(tracked)) - seen
+        for m in sorted(extra):
             v = summ.get(mkey(prov, m)) or {}
-            rows.append((m, m in tracked, v.get("avg"), v.get("n", 0), v.get("at") or ""))
-        return sorted(rows, key=lambda r: (not r[1], r[2] is None, -(r[2] or 0), r[0]))
+            rows.append((m, m in tracked, v.get("avg"), v.get("n", 0), v.get("at") or "", None, "", False))
+        active = self.bench_active_keys()
+        return [r[:7] + (r[7] or mkey(prov, r[0]) in active,) for r in rows]
 
     def open_model_menu(self, prov, widget):
         self.fetch_provider_models(quiet=True)               # aquece a lista real para a próxima vez
         menu = tk.Menu(self, tearoff=0, bg=THEME["panel"], fg=THEME["fg"], activebackground=THEME["accent"], activeforeground="#ffffff")
         info = self.provider_models.get(prov) or {}
-        menu.add_command(label=f"Modelos do {prov} — escolhe 1 para comparar com o gois.v1"
+        rk = info.get("ranking") or {}
+        menu.add_command(label=f"Modelos do {prov} — do mais forte ao mais fraco · escolhe 1 para comparar com o gois.v1"
                                + ("" if info.get("live") else "  (lista ainda não carregada: usa ⟳)"), state=tk.DISABLED)
+        if rk.get("live"):
+            src = f"Ordem: força real online ({rk.get('source', '')}) — não depende dos teus benchmarks"
+        elif info:
+            src = ("Sem dados online: ordem estimada pelo tamanho do modelo. Define ARTIFICIAL_ANALYSIS_API_KEY (grátis) no Render > Environment"
+                   + (f"  [{rk['error']}]" if rk.get("error") else ""))
+        else:
+            src = "A obter a classificação online…"
+        menu.add_command(label=src, state=tk.DISABLED)
         menu.add_separator()
         cur = self.sel_models.get(prov)
         rows = self.provider_rows(prov)
-        for m, tr, avg, n, at in rows:
+        for i, (m, tr, avg, n, at, strength, src_kind, bench) in enumerate(rows, 1):
             if avg is not None:
                 txt = f"{m}    {fscore(avg)} %  ·  {n} medições  ·  há {self.age_txt(at)}"
             elif tr:
                 txt = f"{m}    a medir — ainda sem notas (corre um benchmark)"
             else:
                 txt = f"{m}    não medido (passa a ser medido ao escolher)"
-            menu.add_radiobutton(label=("✔ " if m == cur else "    ") + txt, command=lambda mm=m: self.select_model(prov, mm))
+            force = (f"   ⚡ {strength:g}" + (" ≈" if src_kind == "estimativa" else "")) if strength is not None else ""
+            mark = "🟢 " if bench else ("✔ " if m == cur else "    ")
+            menu.add_radiobutton(label=f"{mark}#{i}  {txt}{force}" + ("   (a fazer benchmark)" if bench else ""),
+                                 command=lambda mm=m: self.select_model(prov, mm))
         stoppable = [r[0] for r in rows if r[1] and r[0] != cur]
         if stoppable and len((self.server_settings.get("tracked_models") or {}).get(prov) or []) > 1:
             menu.add_separator()
@@ -2386,7 +2443,7 @@ class GoisWindow(tk.Tk):
                 sub.add_command(label=m, command=lambda mm=m: self.track_model(prov, mm, False))
             menu.add_cascade(label="Parar de medir (os dados ficam guardados) ▸", menu=sub)
         menu.add_separator()
-        menu.add_command(label=f"⟳ Atualizar a lista real de modelos do {prov}", command=lambda: self.fetch_provider_models(refresh=True))
+        menu.add_command(label=f"⟳ Atualizar a lista e a classificação online do {prov}", command=lambda: self.fetch_provider_models(refresh=True))
         try:
             menu.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height())
         finally:
@@ -2395,6 +2452,7 @@ class GoisWindow(tk.Tk):
     def fetch_provider_models(self, refresh=False, quiet=False):
         if not (self.connected and self.is_admin):
             return
+        self._pm_last = time.time()
 
         def done(res, err):
             if err or not isinstance(res, dict):
@@ -2476,9 +2534,13 @@ class GoisWindow(tk.Tk):
         tk.Label(ctl, text="Modelo em foco:", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
         self.pick_btns = {}
         for key, name, _f in self.MODELS:
+            dot = BenchDot(ctl, THEME["bg"])
+            dot.pack(side=tk.LEFT, padx=(6, 0))
+            self.lamps.append(dot)
+            self.pick_dots[key] = dot
             b = tk.Label(ctl, text=f"● {name}", fg=series_color(key), bg=THEME["panel"], font=("Segoe UI Semibold", 9),
                          padx=10, pady=3, cursor="hand2", highlightthickness=2, highlightbackground=THEME["border"])
-            b.pack(side=tk.LEFT, padx=3)
+            b.pack(side=tk.LEFT, padx=(2, 3))
             b.bind("<Button-1>", lambda e, k=key: self.on_pill(k, e))
             self.pick_btns[key] = b
         cb = ttk.Combobox(ctl, textvariable=self.live_s, values=["5", "10", "30", "60"], width=4, state="readonly")
@@ -2695,6 +2757,8 @@ class GoisWindow(tk.Tk):
             cv.create_text(16, yc, text=f"#{i + 1}" if val is not None else "·", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 10))
             cv.create_oval(46, yc - 5, 56, yc + 5, fill=col, outline="")
             cv.create_text(64, yc, text=short(name, 20), anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
+            if key in self.bench_active_slots():       # círculo verde: está a fazer benchmark agora
+                cv.create_oval(31, yc - 6, 43, yc + 6, fill=BENCH_GREEN, outline=blend(BENCH_GREEN, THEME["panel"], 0.35), width=3)
             cv.create_rectangle(bar_l, yc - 5, bar_r, yc + 5, fill=THEME["border"], outline="")
             if val is None:
                 cv.create_text(bar_r + 8, yc, text="—", anchor="w", fill=THEME["muted"], font=("Segoe UI", 9))
@@ -3473,8 +3537,41 @@ class GoisWindow(tk.Tk):
         txt = str(txt or "")
         return txt if len(txt) <= n else txt[: n - 1] + "…"
 
+    def bench_active_keys(self):
+        """Chaves dos modelos que o servidor diz estarem a fazer benchmark agora: 'gois' e 'Fornecedor|modelo'."""
+        job = self.server_job or {}
+        keys = set(job.get("models") or []) if job.get("kind") == "benchmark" else set()
+        if self.class_kind == "benchmark":          # benchmark lançado por este painel (o gois.v1 entra sempre)
+            keys.add("gois")
+        return keys
+
+    def bench_active_slots(self):
+        """{'gois','mistral','groq'} que estão a fazer benchmark (o fornecedor conta se o modelo escolhido, ou qualquer um, está em prova)."""
+        keys, slots = self.bench_active_keys(), set()
+        if "gois" in keys:
+            slots.add("gois")
+        for slot, prov in MODEL_PROVIDER.items():
+            sel = self.sel_models.get(prov)
+            if (sel and mkey(prov, sel) in keys) or (not sel and any(k.startswith(prov + "|") for k in keys)):
+                slots.add(slot)
+        return slots
+
+    def refresh_bench_dots(self):
+        slots = self.bench_active_slots()
+        for key, dot in list(getattr(self, "kpi_dots", {}).items()) + list(getattr(self, "pick_dots", {}).items()):
+            try:
+                dot.set(key in slots)
+            except tk.TclError:
+                pass
+        sig = (tuple(sorted(slots)), tuple(sorted(self.bench_active_keys())))
+        if sig != self._bench_sig:
+            self._bench_sig = sig
+            if hasattr(self, "cv_rank"):
+                self.draw_rank()                   # o ranking também mostra o círculo verde
+
     def refresh_lamps(self):
         try:
+            self.refresh_bench_dots()
             job = self.server_job or {}
             kind = self.class_kind or job.get("kind")
             cat = self.class_cat if self.class_kind else (job.get("category") or "")
@@ -3642,6 +3739,8 @@ class GoisWindow(tk.Tk):
             if not err and isinstance(res, dict):
                 self.server_job = res.get("job") or {}
                 self.refresh_lamps()
+            if time.time() - self._pm_last > 600:          # a classificação online das listas de modelos atualiza-se sozinha (10 min)
+                self.fetch_provider_models(quiet=True)
 
         self.bg(lambda: self.api.call("GET", "/api/job", timeout=15), done)
 
