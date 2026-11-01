@@ -398,6 +398,31 @@ def split_blocks(text: str):
     return blocks
 
 
+_CHAT_HEAD_RE = re.compile(r"^##\s+(Tu|gois\.v1)\s*$", re.I)
+
+
+def parse_chat_markdown(text: str):
+    """Lê um .md no formato do «⬇ Exportar (.md)» (## Tu / ## gois.v1) -> lista de mensagens. Ignora '## ' dentro de blocos de código."""
+    msgs, role, buf, in_code = [], None, [], False
+
+    def flush():
+        body = "\n".join(buf).strip()
+        if role and body:
+            msgs.append({"role": "user" if role == "tu" else "bot", "text": body, **({} if role == "tu" else {"model": "gois.v1"})})
+
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+        m = None if in_code else _CHAT_HEAD_RE.match(line)
+        if m:
+            flush()
+            role, buf = ("tu" if m.group(1).lower() == "tu" else "bot"), []
+        elif role:
+            buf.append(line)
+    flush()
+    return msgs
+
+
 def read_attachment(path: str):
     """-> (conteúdo | None, aviso)"""
     p = Path(path)
@@ -1709,6 +1734,7 @@ class GoisWindow(tk.Tk):
         self.btn(row, "✏ Renomear", self.rename_session, padx=6).pack(side=tk.LEFT, expand=True, fill=tk.X)
         self.btn(row, "🗑 Apagar", self.delete_session, padx=6).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
         self.btn(side, "⬇ Exportar (.md)", self.export_session).pack(fill=tk.X, padx=10, pady=3)
+        self.btn(side, "⬆ Importar (.md)", self.import_session).pack(fill=tk.X, padx=10, pady=3)
         self.btn(side, "🧹 Apagar todas", self.delete_all_sessions).pack(fill=tk.X, padx=10, pady=3)
         srow = tk.Frame(side, bg=THEME["panel"])
         srow.pack(fill=tk.X, padx=10, pady=(6, 0))
@@ -1859,6 +1885,37 @@ class GoisWindow(tk.Tk):
             md = "\n".join(f"## {'Tu' if m['role'] == 'user' else 'gois.v1'}\n\n{m['text']}\n" for m in s["messages"])
             Path(path).write_text(md, encoding="utf-8")
             self.flash(f"💾 Guardado: {path}", THEME["bot"])
+
+    def import_session(self):
+        """Importa um ou mais .md como conversas novas. O formato do «Exportar (.md)» (## Tu / ## gois.v1) volta a ser
+        uma conversa com as mensagens separadas; qualquer outro .md entra como uma única mensagem tua."""
+        paths = filedialog.askopenfilenames(title="Importar conversa(s) em Markdown", parent=self,
+                                            filetypes=[("Markdown", "*.md *.markdown"), ("Todos", "*.*")])
+        if not paths:
+            return
+        done, last, problems = 0, None, []
+        for p in paths:
+            try:
+                text = Path(p).read_text(encoding="utf-8-sig", errors="replace")
+            except Exception as e:
+                problems.append(f"{Path(p).name}: {e}")
+                continue
+            if not text.strip():
+                problems.append(f"{Path(p).name}: ficheiro vazio")
+                continue
+            msgs = parse_chat_markdown(text)
+            if not msgs:
+                msgs = [{"role": "user", "text": text.strip()[:MAX_FILE]}]
+            sid = f"s{int(time.time() * 1000)}{done}"
+            self.sessions.insert(0, {"id": sid, "title": Path(p).stem[:60] or "Importada", "messages": msgs, "updated": time.time()})
+            done, last = done + 1, sid
+        if done:
+            self.save_sessions()
+            self.last_error = None
+            self.switch_session(last)
+            self.flash(f"⬆ {done} conversa(s) importada(s).", THEME["bot"])
+        if problems:
+            messagebox.showwarning("Importar .md", "Não importei:\n" + "\n".join(problems), parent=self)
 
     # ---- renderização ----
     def copy_text(self, text, btn=None):
