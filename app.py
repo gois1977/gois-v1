@@ -1374,7 +1374,7 @@ DIRECTIVE_EVAL_MAX_N = 6
 RELIABILITY_HIGH, RELIABILITY_MID = 80.0, 50.0
 TRUNCATED_LIMIT = 0.5          # >= 50 % das respostas cortadas pelo contexto -> o fine-tune não resolve
 EVAL_TASK = None
-EVAL_STATE = {"error": "", "at": None, "done": 0, "total": 0}
+EVAL_STATE = {"error": "", "error_id": "", "stopped": False, "current": "", "scope": "", "at": None, "done": 0, "total": 0}
 
 
 def _dhash(text: str) -> str:
@@ -1503,20 +1503,26 @@ async def evaluate_directive(scope: str, did: str, n: int) -> dict:
 
 
 async def run_directive_eval(scope: str, ids: list, n: int) -> None:
-    EVAL_STATE.update(error="", at=None, done=0, total=len(ids))
+    EVAL_STATE.update(error="", error_id="", stopped=False, current="", scope=scope, at=None, done=0, total=len(ids))
     try:
         async with job_slot("directives", scope):
             for did in ids:
+                EVAL_STATE["current"] = did
                 CURRENT_JOB["category"] = f"{scope} · {EVAL_STATE['done'] + 1}/{len(ids)}"
                 try:
                     await evaluate_directive(scope, did, n)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    EVAL_STATE["error"] = str(e)[:300]
+                    EVAL_STATE.update(error=str(e)[:300] or type(e).__name__, error_id=did)
                     break                                # pára no primeiro erro (não gasta tokens à toa)
                 EVAL_STATE["done"] += 1
                 save_db()
+    except asyncio.CancelledError:
+        EVAL_STATE["stopped"] = True
+        raise
     finally:
-        EVAL_STATE["at"] = now_iso()
+        EVAL_STATE.update(current="", at=now_iso())
 
 
 async def classroom_loop() -> None:
@@ -1887,8 +1893,21 @@ async def evaluate_directives(scope: str, request: Request):
         n = max(1, min(DIRECTIVE_EVAL_MAX_N, int(body.get("n") or DIRECTIVE_EVAL_N)))
     except (TypeError, ValueError):
         raise HTTPException(400, "n inválido.")
-    EVAL_STATE.update(error="", at=None, done=0, total=len(ids))
+    EVAL_STATE.update(error="", error_id="", stopped=False, current="", scope=scope, at=None, done=0, total=len(ids))
     EVAL_TASK = asyncio.create_task(run_directive_eval(scope, [str(i) for i in ids], n))
+    return prompts_view()
+
+
+@app.post("/api/directives/evaluate/stop")
+async def stop_directive_eval(request: Request):
+    """Pára a medição em curso (as diretrizes já medidas ficam guardadas)."""
+    await require_admin(request)
+    if EVAL_TASK is not None and not EVAL_TASK.done():
+        EVAL_TASK.cancel()
+        try:
+            await EVAL_TASK
+        except BaseException:
+            pass
     return prompts_view()
 
 
