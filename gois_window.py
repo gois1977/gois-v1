@@ -813,6 +813,39 @@ class GoisWindow(tk.Tk):
     def card(self, parent, **kw):
         return tk.Frame(parent, bg=THEME["panel"], highlightbackground=THEME["border"], highlightthickness=1, **kw)
 
+    def make_scroll_area(self, parent, bg=None):
+        """Zona com scroll vertical (roda do rato incluída). Devolve (contentor a empacotar, frame interior onde se põem as linhas)."""
+        bg = bg or THEME["panel"]
+        wrap = tk.Frame(parent, bg=bg)
+        cv = tk.Canvas(wrap, bg=bg, highlightthickness=0)
+        vs = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=cv.yview)
+        cv.configure(yscrollcommand=vs.set)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = tk.Frame(cv, bg=bg)
+        win_id = cv.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.bind("<Configure>", lambda e: cv.itemconfigure(win_id, width=e.width))
+
+        def wheel(e):
+            if inner.winfo_height() > cv.winfo_height():
+                cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+
+        def enter(_e):
+            cv.bind_all("<MouseWheel>", wheel)
+
+        def leave(e):
+            try:
+                under = wrap.winfo_containing(e.x_root, e.y_root)
+            except (tk.TclError, KeyError):
+                under = None
+            if under is None or not str(under).startswith(str(wrap)):      # só larga a roda quando o rato saiu mesmo da zona
+                cv.unbind_all("<MouseWheel>")
+
+        wrap.bind("<Enter>", enter)
+        wrap.bind("<Leave>", leave)
+        return wrap, inner
+
     def kpi_card(self, parent, key, title, color=None, big=False, status=False):
         f = self.card(parent)
         f.pack(side=tk.LEFT, padx=(0, 10), fill=tk.Y)
