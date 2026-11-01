@@ -754,6 +754,39 @@ async def learn_category(cat: str, provider: str = "auto") -> dict:
         return lesson
 
 
+REASONING_HINTS = ("gpt-oss", "qwen3", "qwq", "deepseek-r1", "-r1", "magistral", "o1", "o3", "o4", "reasoning", "thinking")
+REASONING_EXTRA_TOKENS = 1500     # margem para o "raciocínio" interno; a parte VISÍVEL da resposta continua limitada pelo prompt
+PROVIDER_GATES = {"Mistral": [asyncio.Semaphore(1), 1.4, 0.0], "Groq": [asyncio.Semaphore(2), 0.6, 0.0]}   # [semáforo, intervalo mín. s, última]
+
+
+def is_reasoning_model(model: str) -> bool:
+    m = (model or "").lower()
+    return any(h in m for h in REASONING_HINTS)
+
+
+async def gated_try(prov: str, msgs, retries: int = 2, **kw):
+    """try_providers com cadência por fornecedor e repetição em 429 (limite por minuto dos planos grátis)."""
+    gate = PROVIDER_GATES.get(prov)
+    errs_all = []
+    for attempt in range(retries + 1):
+        if gate:
+            async with gate[0]:
+                wait = gate[2] + gate[1] - time.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                res = await try_providers(msgs, only=prov, **kw)
+                gate[2] = time.time()
+        else:
+            res = await try_providers(msgs, only=prov, **kw)
+        if res[0] is not None:
+            return res[0], res[1], res[2], errs_all + res[3]
+        errs_all += res[3]
+        if not any("429" in e for e in res[3]) or attempt == retries:
+            break
+        await asyncio.sleep(6 + 6 * attempt)          # espera pelo limite por minuto e tenta de novo
+    return None, None, None, errs_all
+
+
 def parse_scores(text: str) -> dict:
     out = {}
     for letter, num in re.findall(r"\b([A-Z])\s*[=:]\s*(\d{1,3})", text or ""):
@@ -769,7 +802,8 @@ async def make_bench_question(cat: str) -> str:
         for p in get_providers("public"):
             if not candidate_keys(p):
                 continue
-            data, prov, model, _ = await try_providers(msgs, temperature=0.8, only=p["name"], timeout=45.0, max_tokens=300)
+            data, prov, model, _ = await gated_try(p["name"], msgs, temperature=0.8, timeout=45.0,
+                                                   max_tokens=300 + (REASONING_EXTRA_TOKENS if is_reasoning_model(p["models"][0]) else 0))
             if data is None:
                 continue
             q = reply_text(data).strip()
@@ -793,8 +827,8 @@ async def judge_scores(question: str, entries: list):
     for p in sorted(get_providers("public"), key=lambda x: x["name"] in CONTESTANTS):
         if not candidate_keys(p):
             continue
-        jdata, jprov, jmodel, jerr = await try_providers(msgs, temperature=0.0, only=p["name"], timeout=60.0,
-                                                         max_tokens=12 * len(entries) + 40)
+        jdata, jprov, jmodel, jerr = await gated_try(p["name"], msgs, temperature=0.0, timeout=90.0,
+                                                     max_tokens=12 * len(entries) + 40 + REASONING_EXTRA_TOKENS)
         errs += jerr
         if jdata is None:
             continue
@@ -855,7 +889,7 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
         recent = [k for k in DB_KNOWLEDGE if k.get("category") == cat][-2:]
         extra = "\n".join(f"- {k.get('title', '')}: {str(k.get('content', ''))[:350]}" for k in recent)
         gois_msgs = prepare_messages([{"role": "user", "content": question}], is_admin=True, extra_context=extra)
-        ref_msgs = [{"role": "system", "content": "Responde de forma rigorosa e concisa."}, {"role": "user", "content": question}]
+        ref_msgs = [{"role": "system", "content": "Responde de forma rigorosa e concisa, em no máximo 200 palavras."}, {"role": "user", "content": question}]
 
         targets = []
         for prov in CONTESTANTS:
@@ -865,12 +899,13 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
         if not targets:
             raise RuntimeError("Nenhum fornecedor de referência tem chave (MISTRAL_API_KEY / GROQ_API_KEY no Render).")
 
-        sem = asyncio.Semaphore(3)      # não rebentar os limites por minuto dos fornecedores gratuitos
+        sem = asyncio.Semaphore(4)      # a cadência fina por fornecedor está em gated_try (Mistral ~1 pedido/1,4 s)
 
         async def ask_ref(prov, model):
             async with sem:
-                d, used_prov, used_model, errs = await try_providers(
-                    ref_msgs, temperature=BENCH_TEMPERATURE, only=prov, models=[model], timeout=45.0, max_tokens=BENCH_MAX_TOKENS)
+                budget = BENCH_MAX_TOKENS + (REASONING_EXTRA_TOKENS if is_reasoning_model(model) else 0)
+                d, used_prov, used_model, errs = await gated_try(
+                    prov, ref_msgs, temperature=BENCH_TEMPERATURE, models=[model], timeout=90.0, max_tokens=budget)
             txt = reply_text(d) if d else ""
             return mkey(prov, model), txt, (usage_tokens(d, txt) if d else 0), used_prov, errs
 
@@ -890,7 +925,7 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
                                "Confirma que está ligado (▶ Ligar modelo próprio) e com contexto de 4096.")
 
         answered = [(k, t) for k, t, _tok, _p, _e in refs if t]
-        missing = [k for k, t, _tok, _p, _e in refs if not t]
+        missing = [f"{k} ({(e[-1] if e else 'resposta vazia')})" for k, t, _tok, _p, e in refs if not t]
         if not answered:
             raise RuntimeError("Nenhum modelo de referência respondeu, por isso não há com quem comparar. "
                                "Confirma as chaves MISTRAL_API_KEY / GROQ_API_KEY no Render e tenta de novo.")
@@ -898,7 +933,7 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
         random.shuffle(entries)
         by_name, jerr, judge = await judge_scores(question, entries)
         if by_name is None:
-            raise RuntimeError("O juiz não devolveu notas válidas (" + ("; ".join(jerr[-3:]) or "sem detalhe") + "). Tenta de novo.")
+            raise RuntimeError("O juiz não devolveu notas válidas (" + ("; ".join(jerr[-8:]) or "sem detalhe") + "). Tenta de novo.")
 
         e = comp_entry(cat)
         stamp = now_iso()
