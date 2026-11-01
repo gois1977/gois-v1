@@ -3,10 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#18181b">
+<meta name="color-scheme" content="dark">
 <title>gois.v1 | Chat</title>
 <style>
-:root{--bg:#1f1e1d;--panel:#2a2927;--panel2:#34332f;--border:#3d3b37;--fg:#f2f0e8;--muted:#a9a79e;--accent:#c6613f;--accent2:#d97757;--user:#c6613f;--danger:#e5604f;--code:#181817;--codefg:#e8c39e;--ok:#93ad73;--warn:#e0a458;--blue:#6a9bcc}
-@media(prefers-color-scheme:light){:root{--bg:#faf9f5;--panel:#ffffff;--panel2:#f1efe7;--border:#e2dfd3;--fg:#1a1a18;--muted:#6f6d66;--accent:#c6613f;--accent2:#b5532f;--user:#c6613f;--danger:#c0392b;--code:#f5f4ee;--codefg:#9a4a2f;--ok:#5a7340;--warn:#a86a12;--blue:#3f6e9e}}
+:root{color-scheme:dark;
+  --bg:#18181b;--panel:#212126;--panel2:#2b2b32;--border:#3a3a43;
+  --fg:#f5eef2;--muted:#a1a1aa;
+  --accent:#ec4899;--accent2:#f472b6;--user:#db2777;
+  --live:#ff3d9a;                /* círculo dos modelos a fazer benchmark (muda aqui, p.ex. #22c55e para verde) */
+  --danger:#fb7185;--ok:#f9a8d4;--warn:#f472b6;--blue:#f472b6;
+  --code:#131316;--codefg:#f9a8d4}
 *{box-sizing:border-box}
 body{margin:0;height:100vh;display:flex;background:var(--bg);color:var(--fg);font-family:'Segoe UI',-apple-system,system-ui,sans-serif;overflow:hidden}
 #brand,.adm-h>span,.sec h3,.k .v{font-family:Georgia,'Times New Roman',serif}
@@ -45,7 +52,7 @@ pre{margin:0;padding:12px;overflow-x:auto;font-family:Consolas,Monaco,monospace;
 .msg-acts{display:flex;gap:6px;margin-top:8px}
 #dock{position:absolute;bottom:0;left:0;right:0;padding:12px 16px;background:linear-gradient(transparent,var(--bg) 30%);display:flex;justify-content:center}
 #box{max-width:900px;width:100%;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:8px 12px;display:flex;flex-direction:column;gap:6px}
-#box.drag{border-color:var(--accent);box-shadow:0 0 0 2px rgba(198,97,63,.35)}
+#box.drag{border-color:var(--accent);box-shadow:0 0 0 2px rgba(236,72,153,.35)}
 #files{display:flex;gap:6px;flex-wrap:wrap}
 .pill{background:var(--user);color:#fff;border-radius:4px;padding:2px 8px;font-size:.75rem;display:inline-flex;gap:6px;align-items:center}
 .pill b{cursor:pointer}
@@ -78,7 +85,7 @@ body.admin #admBtn{display:inline-block}
 .k .s{font-size:.7rem;color:var(--muted)}
 .bar{height:6px;background:var(--panel2);border-radius:4px;overflow:hidden;margin:4px 0}
 .bar>i{display:block;height:100%;background:var(--accent2)}
-.bar.warn>i{background:#d29922}
+.bar.warn>i{background:var(--warn)}
 .bar.full>i{background:var(--danger)}
 .tw{overflow-x:auto}
 table.t{width:100%;border-collapse:collapse;font-size:.82rem;min-width:420px}
@@ -99,19 +106,29 @@ body.admin .lamp{display:inline-flex}
 .lamp .lt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lamp .pre{display:none}
 @media(min-width:520px){.lamp .pre{display:inline}}
-.dot{position:relative;width:10px;height:10px;border-radius:50%;background:var(--c,#8b949e);flex-shrink:0}
+.dot{position:relative;width:10px;height:10px;border-radius:50%;background:var(--c,#71717a);flex-shrink:0}
 .dot.pulse::after{content:"";position:absolute;inset:-2px;border-radius:50%;border:2px solid var(--c);animation:ring 1.5s ease-out infinite}
 .dot.slow{animation:breathe 2.2s ease-in-out infinite}
-.spinr{width:16px;height:16px;border-radius:50%;border:3px solid rgba(139,148,158,.28);border-top-color:var(--c);animation:rot .8s linear infinite;flex-shrink:0}
-.badge{position:relative;width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:.82rem;background:rgba(139,148,158,.2);color:var(--muted);flex-shrink:0}
+.spinr{width:16px;height:16px;border-radius:50%;border:3px solid rgba(161,161,170,.28);border-top-color:var(--c);animation:rot .8s linear infinite;flex-shrink:0}
+.badge{position:relative;width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:.82rem;background:rgba(161,161,170,.2);color:var(--muted);flex-shrink:0}
 .badge.on{background:var(--user);color:#fff}
 .badge.on::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--user);animation:ring 1.4s ease-out infinite}
 .lrow{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap}
 .lrow h3{margin:0}
+.live-dot{display:none;position:relative;width:10px;height:10px;border-radius:50%;background:var(--live);vertical-align:middle;margin-left:6px;flex-shrink:0}
+.live-dot.on{display:inline-block}
+.live-dot.on::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--live);animation:ring 1.4s ease-out infinite}
+.mrow{display:flex;align-items:center;gap:8px;padding:7px 4px;border-bottom:1px solid var(--panel2);font-size:.84rem}
+.mrow:last-child{border-bottom:0}
+.mrow .rk{width:2.2em;color:var(--muted);font-variant-numeric:tabular-nums}
+.mrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mrow .sc{color:var(--accent2);font-weight:700;font-variant-numeric:tabular-nums}
+.mrow .tg{font-size:.68rem;color:var(--muted);border:1px solid var(--border);border-radius:10px;padding:1px 7px}
+.mrow.cur .nm{font-weight:700}
 @keyframes ring{from{transform:scale(1);opacity:.9}to{transform:scale(1.9);opacity:0}}
 @keyframes breathe{0%,100%{opacity:.3}50%{opacity:1}}
 @keyframes rot{to{transform:rotate(360deg)}}
-@media(prefers-reduced-motion:reduce){.dot,.dot::after,.spinr,.badge::after{animation:none!important}}
+@media(prefers-reduced-motion:reduce){.dot,.dot::after,.spinr,.badge::after,.live-dot::after{animation:none!important}}
 </style>
 </head>
 <body>
@@ -127,7 +144,7 @@ body.admin .lamp{display:inline-flex}
 <div id="main">
   <div class="top">
     <button id="menu" onclick="toggleSide()">☰</button>
-    <span id="brand" onclick="brandClick()">🟢 gois.v1</span>
+    <span id="brand" onclick="brandClick()">💗 gois.v1</span>
     <button id="admBtn" class="sm" onclick="openAdmin()">📊 Painel</button>
     <span class="lamp" id="modelLamp" title="Estado do modelo"><i class="dot"></i><span><span class="pre"></span><span class="lt"></span></span></span>
     <span id="title" style="margin-left:auto;color:var(--muted);font-size:.8rem;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%"></span>
@@ -183,7 +200,7 @@ async function initAdmin(){
     }catch(e){ isAdmin = false; }
   }
   document.body.classList.toggle('admin', isAdmin);
-  $('brand').textContent = isAdmin ? '🟢 gois.v1 | Admin' : '🟢 gois.v1';
+  $('brand').textContent = isAdmin ? '💗 gois.v1 | Admin' : '💗 gois.v1';
 }
 async function brandClick(){
   clicks++; clearTimeout(clickT); clickT = setTimeout(()=>clicks=0, 1500);
@@ -405,6 +422,7 @@ async function admLoad(){
     return;
   }
   admRender();
+  if(!admModelsData || Date.now() - admModelsAt > 600000) admLoadModels(false);
   admApi('/api/local/status').then(s => { admLocal = s; admRenderLocal(); }).catch(() => {});
 }
 
@@ -438,8 +456,22 @@ function admTotals(cats, models){
     return {m, avg: v.length ? v.reduce((a, b) => a + b, 0) / v.length : null, n: v.length, own: list.filter(e => m.get(e) != null).length};
   });
 }
-function kpi(label, value, sub, cls){
-  const k = ce('div', 'k'); k.append(ce('div', 'l', label), ce('div', 'v ' + (cls || ''), value), ce('div', 's', sub || '')); return k;
+function liveDot(key){ const d = ce('i', 'live-dot'); d.dataset.live = key; d.title = 'A fazer benchmark agora'; return d; }
+// modelos que estão a fazer benchmark agora: 'gois' e 'Fornecedor|modelo' (o servidor diz em /api/job; localmente o gois.v1 conta logo ao carregar em ⚔️)
+function liveKeys(){
+  const s = new Set();
+  if(jobState && jobState.kind === 'benchmark') (jobState.models || []).forEach(k => s.add(k));
+  if(localJob && localJob.kind === 'benchmark') s.add('gois');
+  return s;
+}
+function updateLiveDots(){
+  const live = liveKeys();
+  document.querySelectorAll('[data-live]').forEach(el => el.classList.toggle('on', live.has(el.dataset.live)));
+}
+function kpi(label, value, sub, cls, liveKey){
+  const k = ce('div', 'k'), l = ce('div', 'l', label);
+  if(liveKey) l.append(liveDot(liveKey));
+  k.append(l, ce('div', 'v ' + (cls || ''), value), ce('div', 's', sub || '')); return k;
 }
 function barEl(used, cap){
   const b = ce('div', 'bar'), i = document.createElement('i');
@@ -472,12 +504,19 @@ function admRender(){
   const g = ce('div', 'kg');
   const rank = [...tot].filter(t => t.avg != null).sort((a, b) => b.avg - a.avg).map(t => t.m.key);
   tot.forEach(t => g.append(kpi((t.m.model ? t.m.label + ' · ' + t.m.model : t.m.label) + ' · total', fmtP(t.avg),
-    (rank.includes(t.m.key) ? '#' + (rank.indexOf(t.m.key) + 1) + ' · ' : '') + t.own + '/' + names.length + ' categorias medidas')));
+    (rank.includes(t.m.key) ? '#' + (rank.indexOf(t.m.key) + 1) + ' · ' : '') + t.own + '/' + names.length + ' categorias medidas', '', t.m.mk || 'gois')));
   const pbm = comp.parity_by_model || {};
   models.filter(m => m.mk).forEach(m => g.append(kpi('Paridade vs ' + m.label, pbm[m.mk] != null ? fmtS(pbm[m.mk]) + ' %' : '—', 'gois.v1 ÷ ' + (m.model || m.label))));
   g.append(kpi('Capacidade restante (estim.)', cap.total_capacity ? fmtN(cap.total_remaining) : '—', cap.total_capacity ? 'de ' + fmtN(cap.total_capacity) : 'define abaixo'));
   g.append(kpi('Tokens hoje', fmtN(tok.used_today), 'limite ' + (tok.daily_limit ? fmtN(tok.daily_limit) : '∞') + ' · total ' + fmtN(tok.used_total)));
   body.append(g);
+
+  // modelos por força real (dados online; nunca pelos teus benchmarks)
+  const ms = ce('div', 'sec'), mh = ce('div', 'lrow');
+  const mb = ce('button', 'sm', '⟳'); mb.title = 'Atualizar a classificação online'; mb.onclick = () => admLoadModels(true);
+  mh.append(ce('h3', '', '🏆 Modelos por força real (online)'), mb); ms.append(mh);
+  const mbody = ce('div'); mbody.id = 'admModels'; ms.append(mbody); body.append(ms);
+  admRenderModels();
 
   // tokens e capacidade
   const ts = ce('div', 'sec'); ts.append(ce('h3', '', '🔋 Tokens e capacidade diária (estimativa)'));
@@ -511,7 +550,7 @@ function admRender(){
   const ch = ce('div', 'lrow'); ch.append(ce('h3', '', '📊 Comparação por categoria'), mkBench()); cs.append(ch);
   cs.append(ce('div', 'muted', 'Toca numa linha para escolher a categoria.'));
   const tw = ce('div', 'tw'), tb = ce('table', 't');
-  const head = ce('tr'); ['Categoria', ...models.map(m => m.label), 'Lições', 'Bench.'].forEach(h => head.append(ce('th', '', h)));
+  const head = ce('tr'); ['Categoria', ...models.map(m => m.label), 'Lições', 'Bench.'].forEach((h, i) => { const th = ce('th', '', h); if(i >= 1 && i <= models.length) th.append(liveDot(models[i - 1].mk || 'gois')); head.append(th); });
   const th = ce('thead'); th.append(head); tb.append(th);
   const tbd = ce('tbody');
   names.forEach(n => {
@@ -533,9 +572,39 @@ function admRender(){
   admRenderLocal();
   updateLamps();
 }
+let admModelsData = null, admModelsAt = 0;
+async function admLoadModels(force){
+  try{ admModelsData = await admApi('/api/provider-models' + (force ? '?refresh=1' : '')); admModelsAt = Date.now(); }
+  catch(e){ admModelsData = null; const b = $('admModels'); if(b) b.replaceChildren(ce('div', 'bad', '❌ ' + e.message)); return; }
+  admRenderModels();
+}
+// listas SEMPRE do mais forte ao mais fraco, pela classificação online que o servidor devolve já ordenada
+function admRenderModels(){
+  const b = $('admModels'); if(!b) return;
+  if(!admModelsData){ b.replaceChildren(ce('div', 'muted', 'A obter a classificação online…')); if(Date.now() - admModelsAt > 5000) admLoadModels(false); return; }
+  b.replaceChildren();
+  for(const prov of ['Mistral', 'Groq']){
+    const info = admModelsData[prov]; if(!info) continue;
+    const rk = info.ranking || {};
+    b.append(ce('div', 'muted', prov + ' · ' + (rk.live ? 'ordem por dados online (' + (rk.source || '') + ')'
+      : 'sem dados online: ordem estimada pelo tamanho (define ARTIFICIAL_ANALYSIS_API_KEY no Render)')));
+    const sel = ((admModels(admData || {}).find(m => m.key === prov)) || {}).model;
+    (info.models || []).forEach(m => {
+      const r = ce('div', 'mrow' + (m.id === sel ? ' cur' : ''));
+      r.append(ce('span', 'rk', '#' + m.rank));
+      const nm = ce('span', 'nm', m.id); nm.append(liveDot(prov + '|' + m.id)); r.append(nm);
+      if(m.tracked) r.append(ce('span', 'tg', 'em medição'));
+      r.append(ce('span', 'sc', m.strength != null ? (m.strength_src === 'estimativa' ? '≈' : '') + fmtS(m.strength) : '—'));
+      b.append(r);
+    });
+    b.append(Object.assign(ce('div'), {style: 'height:10px'}));
+  }
+  if(admModelsData.Mistral && (admModelsData.Mistral.ranking || {}).live) b.append(ce('div', 'muted', 'Fonte: Artificial Analysis (artificialanalysis.ai) · Intelligence Index'));
+  updateLiveDots();
+}
 function admRenderLocal(){
   const e = $('admLocal'); if(!e || !admLocal) return;
-  e.textContent = 'Modelo próprio: ' + (admLocal.online ? '🟢 online (' + admLocal.model + ')' : admLocal.url_set ? '🔴 offline' + (admLocal.error ? ' (' + admLocal.error + ')' : '') : '⚪ sem URL configurado');
+  e.textContent = 'Modelo próprio: ' + (admLocal.online ? '● online (' + admLocal.model + ')' : admLocal.url_set ? '● offline' + (admLocal.error ? ' (' + admLocal.error + ')' : '') : '○ sem URL configurado');
 }
 
 async function admAct(tag, work, pick){
@@ -587,7 +656,8 @@ function setLamp(id, mode, color, text, pre){
   el.querySelector('.lt').textContent = text;
 }
 function updateLamps(){
-  const G = '#93ad73', W = '#e0a458', R = '#e5604f', M = '#a9a79e';
+  updateLiveDots();
+  const G = '#f472b6', W = '#f9a8d4', R = '#fb7185', M = '#a1a1aa';   // só rosa e cinza
   const m = modelState;
   const ml = $('modelLamp');
   if(ml){
