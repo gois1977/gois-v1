@@ -4038,6 +4038,13 @@ class GoisWindow(tk.Tk):
         self.dir_cost = tk.Label(t, text="", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W,
                                  wraplength=1150)
         self.dir_cost.pack(fill=tk.X, padx=20, pady=(4, 0))
+        mrow = tk.Frame(t, bg=THEME["bg"])
+        mrow.pack(fill=tk.X, padx=20, pady=(2, 0))
+        self.dir_lamp = self.make_lamp(mrow, THEME["bg"], 700, 28)
+        self.dir_lamp.pack(side=tk.LEFT)
+        self.dir_stop_btn = self.btn(mrow, "⏹ Parar medição", self.directive_stop, THEME["danger"])
+        self.dir_stop_btn.pack(side=tk.RIGHT)
+        self.dir_stop_btn.config(state=tk.DISABLED)
 
         # --- parte de baixo (empacotada primeiro para reservar o espaço): barra, texto livre (escondido) e detalhe
         bar = tk.Frame(t, bg=THEME["bg"])
@@ -4167,13 +4174,25 @@ class GoisWindow(tk.Tk):
             ev = data.get("eval") or {}
             extra = ""
             if ev.get("running"):
-                extra = (f"🧪 A medir as diretrizes no servidor… {ev.get('done', 0)}/{ev.get('total', 0)} concluídas "
-                         "(cada uma demora alguns minutos; podes continuar a usar a app).")
+                extra = (f"🧪 A medir as diretrizes {'admin' if ev.get('scope') == 'admin' else 'públicas'} no servidor… "
+                         f"{ev.get('done', 0)}/{ev.get('total', 0)} concluídas (cada uma demora alguns minutos; podes continuar a usar a app).")
+                self.dir_lamp.set("spin", THEME["bot"], f"A medir… {ev.get('done', 0)}/{ev.get('total', 0)} concluídas")
+                self.dir_stop_btn.config(state=tk.NORMAL)
                 self.dir_poll_start()
-            elif ev.get("error"):
-                extra = "⚠ Última medição parou: " + str(ev["error"])
+            else:
+                self.dir_stop_btn.config(state=tk.DISABLED)
+                if ev.get("error"):
+                    extra = "❌ A medição falhou: " + str(ev["error"])
+                    self.dir_lamp.set("off", THEME["danger"], "Erro: " + short(str(ev["error"]), 90))
+                elif ev.get("stopped"):
+                    extra = "⏹ Medição parada (as diretrizes já medidas ficam guardadas)."
+                    self.dir_lamp.set("off", THEME["warn"], "Medição parada")
+                elif ev.get("at"):
+                    self.dir_lamp.set("off", THEME["bot"], f"Medição concluída · {ev.get('done', 0)}/{ev.get('total', 0)}")
+                else:
+                    self.dir_lamp.set("off", THEME["muted"], "Sem medição a correr")
             if extra:
-                self.dir_cost.config(text=(self.dir_cost.cget("text") + "\n" + extra).strip())
+                self.dir_cost.config(text=(self.dir_cost.cget("text") + "\n" + extra).strip(), fg=THEME["danger"] if "❌" in extra else THEME["muted"])
             if self._dir_sel not in self._dir_rows:
                 self._dir_sel = None
             self.directive_detail()
@@ -4192,7 +4211,10 @@ class GoisWindow(tk.Tk):
         num.pack(side=tk.LEFT, anchor="n")
         btns = tk.Frame(top, bg=alt)
         btns.pack(side=tk.RIGHT, anchor="n")
-        self.btn(btns, "🧪 Medir", lambda: self.directive_measure(scope, [d["id"]]), padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
+        mb = self.btn(btns, "🧪 Medir", lambda: self.directive_measure(scope, [d["id"]]), padx=8, pady=2)
+        mb.pack(side=tk.LEFT, padx=(0, 4))
+        if (self.prompts_data.get("eval") or {}).get("running"):
+            mb.config(state=tk.DISABLED)
         self.btn(btns, "✏ Editar", lambda: self.directive_dialog(scope, d), padx=8, pady=2).pack(side=tk.LEFT)
         self.btn(btns, "🗑 Remover", lambda: self.directive_remove(scope, d), padx=8, pady=2).pack(side=tk.LEFT, padx=(4, 0))
         txt = tk.Label(top, text=d.get("text", ""), bg=alt, fg=THEME["fg"], font=("Segoe UI", 10), justify=tk.LEFT, anchor="nw", wraplength=300)
@@ -4204,6 +4226,17 @@ class GoisWindow(tk.Tk):
         otxt, ocol = {"padrão": ("padrão do app.py", THEME["muted"]), "editada": ("✎ editada", THEME["warn"]),
                       "criada": ("★ criada por ti", THEME["user"])}.get(origin, (origin, THEME["muted"]))
         tk.Label(meta, text=otxt, bg=alt, fg=ocol, font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        run = self.prompts_data.get("eval") or {}
+        mine_run = bool(run.get("running") and run.get("scope") == scope and run.get("current") == d["id"])
+        mine_err = bool(not run.get("running") and run.get("error") and run.get("scope") == scope and run.get("error_id") == d["id"])
+        if mine_run:
+            row.config(highlightbackground=THEME["bot"])
+            lamp = self.make_lamp(meta, alt, 190, 22)
+            lamp.set("spin", THEME["bot"], "a medir agora…")
+            lamp.pack(side=tk.RIGHT)
+        elif mine_err:
+            row.config(highlightbackground=THEME["danger"])
+            tk.Label(meta, text="❌ erro: " + short(str(run["error"]), 70), bg=alt, fg=THEME["danger"], font=("Segoe UI", 8)).pack(side=tk.RIGHT)
         ev = d.get("eval") or {}
         rel = d.get("reliability", "")
         if d.get("measured") and ev:
@@ -4298,6 +4331,9 @@ class GoisWindow(tk.Tk):
         """Mede no servidor (em segundo plano) a fiabilidade e a necessidade de fine-tune; a lista atualiza-se sozinha."""
         if not self.require_admin_ui():
             return
+        if (self.prompts_data.get("eval") or {}).get("running"):
+            self.flash("Já há uma medição em curso: pára-a primeiro (⏹ Parar medição).", THEME["warn"])
+            return
         nome = "admin" if scope == "admin" else "públicas"
         what = "esta diretriz" if ids else f"todas as diretrizes {nome}"
         if not messagebox.askyesno("Medir diretrizes", f"Medir {what} no sistema real?\n\nUsa o teu modelo (admin) ou os fornecedores (público) e "
@@ -4306,10 +4342,16 @@ class GoisWindow(tk.Tk):
         self.directive_call("POST", f"/api/directives/{scope}/evaluate", {"ids": ids} if ids else {}, "🧪 Medição iniciada no servidor.",
                             on_ok=self.dir_poll_start)
 
+    def directive_stop(self):
+        if not self.require_admin_ui():
+            return
+        self.dir_stop_btn.config(state=tk.DISABLED)
+        self.directive_call("POST", "/api/directives/evaluate/stop", {}, "⏹ Medição parada.")
+
     def dir_poll_start(self):
         if getattr(self, "_dir_poll", None):
             return
-        self._dir_poll = self.after(6000, self.dir_poll_tick)
+        self._dir_poll = self.after(3000, self.dir_poll_tick)
 
     def dir_poll_tick(self):
         self._dir_poll = None
@@ -4322,8 +4364,13 @@ class GoisWindow(tk.Tk):
             self.prompts_ui_fill()                      # se ainda estiver a correr, o preenchimento volta a agendar a consulta
             ev = res.get("eval") or {}
             if was and not ev.get("running"):
-                self.flash("⚠ Medição parou: " + str(ev["error"])[:120] if ev.get("error") else "🧪 Medição das diretrizes concluída.",
-                           THEME["danger"] if ev.get("error") else THEME["bot"], ms=10000)
+                if ev.get("error"):
+                    self.flash("❌ Medição falhou: " + str(ev["error"])[:120], THEME["danger"], ms=15000)
+                    messagebox.showerror("Medir diretrizes", "A medição falhou:\n\n" + str(ev["error"]), parent=self)
+                elif ev.get("stopped"):
+                    self.flash("⏹ Medição parada.", THEME["warn"], ms=8000)
+                else:
+                    self.flash("🧪 Medição das diretrizes concluída.", THEME["bot"], ms=10000)
 
         self.bg(lambda: self.api.call("GET", "/api/prompts", timeout=40), done)
 
