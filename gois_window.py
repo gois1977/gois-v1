@@ -1461,8 +1461,10 @@ class GoisWindow(tk.Tk):
                     top.pack(fill=tk.X, padx=8, pady=(6, 0))
                     btns = tk.Frame(top, bg=alt)
                     btns.pack(side=tk.RIGHT)
+                    rf = self.btn(btns, "⟳ Atualizar", lambda v=v: env_refresh(v), padx=8, pady=2)
                     ed = self.btn(btns, "✏ Editar", lambda v=v: env_dialog(v), padx=8, pady=2)
                     rm = self.btn(btns, "🗑 Remover", lambda v=v: env_remove(v), padx=8, pady=2)
+                    rf.pack(side=tk.LEFT, padx=(0, 4))
                     ed.pack(side=tk.LEFT)
                     rm.pack(side=tk.LEFT, padx=(4, 0))
                     if not v.get("editable"):
@@ -1506,6 +1508,43 @@ class GoisWindow(tk.Tk):
                     pass
 
             self.bg(lambda: self.api.call("GET", "/api/env", timeout=60), done)
+
+        def env_refresh(v):
+            """Botão ⟳ de cada variável: relê a lista do Render e, se for chave de um fornecedor, testa a chave de verdade."""
+            if not self.is_admin:
+                return
+            name, prov = v["key"], v.get("provider")
+            info.config(text=f"⏳ a atualizar {name}…", fg=THEME["muted"])
+
+            def work():
+                check = None
+                if prov:
+                    try:
+                        check = self.api.call("GET", f"/api/keys/check/{prov}", timeout=60)
+                    except ApiError as e:
+                        check = {"ok": False, "detail": str(e)}
+                return self.api.call("GET", "/api/env", timeout=60), check
+
+            def done(res, err):
+                try:
+                    if not win.winfo_exists():
+                        return
+                    if err:
+                        info.config(text=f"❌ {name}: {err}", fg=THEME["danger"])
+                        return
+                    data, check = res
+                    env_state.update(data, loaded=True)
+                    draw_env()
+                    if check is None:
+                        info.config(text=f"✅ {name} atualizada a partir do servidor.", fg=THEME["fg"])
+                    elif check.get("ok"):
+                        info.config(text=f"✅ {name} atualizada · chave e ligação OK ({check.get('detail', '')}).", fg=THEME["bot"])
+                    else:
+                        info.config(text=f"⚠ {name} atualizada, mas o teste da chave falhou: {check.get('detail', 'sem detalhe')}", fg=THEME["warn"])
+                except tk.TclError:
+                    pass
+
+            self.bg(work, done)
 
         def after_change(res, verb):
             try:
@@ -3972,12 +4011,13 @@ class GoisWindow(tk.Tk):
     PROMPT_ADMIN_SOFT = 1200   # acima disto o prompt do admin come espaço à conversa (contexto ~2048 tokens)
 
     DIRECTIVE_HELP = (
-        "Todas as diretrizes valem já: o servidor injeta-as em CADA pedido, sem fine-tune. O fine-tune só serve para as tornar mais fiáveis "
-        "no teu 3B ou para as tirar do prompt (poupa contexto).\n"
-        "Regra prática: afina quando (1) o teste da diretriz falha em mais de 1 de cada 5 pedidos mesmo com ela no prompt; "
-        "(2) tens umas centenas de exemplos que mostram exatamente esse comportamento; (3) o problema é de formato, estilo ou identidade. "
-        "Factos que mudam vão para as lições (já são injetadas), não para o fine-tune.\n"
-        "Mede antes e depois com ⚔ Benchmark: o gois.v1 responde com a diretriz de admin, por isso mexer nela já mexe na nota.")
+        "A fiabilidade e a necessidade de fine-tune NÃO são opiniões: são medidas no sistema gois.v1 real. 🧪 Medir gera pedidos de teste para a "
+        "diretriz, responde com o modelo real (prompt completo + lições + limite de contexto, o mesmo caminho do chat) e outra vez sem a diretriz, "
+        "e um juiz dá a cada resposta, às cegas, a nota de cumprimento.\n"
+        "Fiabilidade: Alta ≥ 80 %, Média ≥ 50 %, Baixa abaixo disso.\n"
+        "Fine-tune: «Não precisa» se cumpre ≥ 80 %; «Não resolve» se falha porque as respostas são cortadas pelo contexto (afinar não aumenta o contexto); "
+        "«Ajuda» se falha por outro motivo; N/A nos fornecedores (não se afinam).\n"
+        "Se editares o texto de uma diretriz a medição fica desatualizada. A medição gasta tokens dos fornecedores (pedidos de teste e juiz), não os do teu modelo.")
 
     RELIABILITY_OPTS = (("alta", "Alta"), ("media", "Média"), ("baixa", "Baixa"))
     FINETUNE_OPTS = (("nao", "Não precisa"), ("ajuda", "Ajuda"), ("nao_resolve", "Não resolve"), ("na", "N/A (terceiros)"))
@@ -4059,6 +4099,7 @@ class GoisWindow(tk.Tk):
             foot.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=8)
             self.btn(foot, "➕ Adicionar diretriz", lambda k=key: self.directive_dialog(k), THEME["accent"]).pack(side=tk.LEFT)
             self.btn(foot, "↺ Repor todas", lambda k=key: self.directive_revert_scope(k)).pack(side=tk.LEFT, padx=8)
+            self.btn(foot, "🧪 Medir todas", lambda k=key: self.directive_measure(k)).pack(side=tk.LEFT)
             wrap, inner = self.make_scroll_area(col, bg)
             wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
             warn = tk.Label(col, text="", bg=bg, fg=THEME["warn"], font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT, wraplength=520)
@@ -4123,6 +4164,16 @@ class GoisWindow(tk.Tk):
                                           f"≈ {cost.get('admin_tokens_est', '?')} tokens ({cost.get('admin_pct_ctx', '?')} % do contexto de {cost.get('ctx', '?')}).")
             else:
                 self.dir_cost.config(text="")
+            ev = data.get("eval") or {}
+            extra = ""
+            if ev.get("running"):
+                extra = (f"🧪 A medir as diretrizes no servidor… {ev.get('done', 0)}/{ev.get('total', 0)} concluídas "
+                         "(cada uma demora alguns minutos; podes continuar a usar a app).")
+                self.dir_poll_start()
+            elif ev.get("error"):
+                extra = "⚠ Última medição parou: " + str(ev["error"])
+            if extra:
+                self.dir_cost.config(text=(self.dir_cost.cget("text") + "\n" + extra).strip())
             if self._dir_sel not in self._dir_rows:
                 self._dir_sel = None
             self.directive_detail()
@@ -4141,6 +4192,7 @@ class GoisWindow(tk.Tk):
         num.pack(side=tk.LEFT, anchor="n")
         btns = tk.Frame(top, bg=alt)
         btns.pack(side=tk.RIGHT, anchor="n")
+        self.btn(btns, "🧪 Medir", lambda: self.directive_measure(scope, [d["id"]]), padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
         self.btn(btns, "✏ Editar", lambda: self.directive_dialog(scope, d), padx=8, pady=2).pack(side=tk.LEFT)
         self.btn(btns, "🗑 Remover", lambda: self.directive_remove(scope, d), padx=8, pady=2).pack(side=tk.LEFT, padx=(4, 0))
         txt = tk.Label(top, text=d.get("text", ""), bg=alt, fg=THEME["fg"], font=("Segoe UI", 10), justify=tk.LEFT, anchor="nw", wraplength=300)
@@ -4152,8 +4204,12 @@ class GoisWindow(tk.Tk):
         otxt, ocol = {"padrão": ("padrão do app.py", THEME["muted"]), "editada": ("✎ editada", THEME["warn"]),
                       "criada": ("★ criada por ti", THEME["user"])}.get(origin, (origin, THEME["muted"]))
         tk.Label(meta, text=otxt, bg=alt, fg=ocol, font=("Segoe UI", 8)).pack(side=tk.LEFT)
-        tk.Label(meta, text=f"  ·  Fiabilidade: {d.get('reliability', '')}  ·  Fine-tune: {d.get('finetune', '')}", bg=alt, fg=THEME["muted"],
-                 font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        ev = d.get("eval") or {}
+        rel = d.get("reliability", "")
+        if d.get("measured") and ev:
+            rel += f" ({fscore(ev.get('score'), 0)} % em {ev.get('n', 0)} testes, há {self.age_txt(ev.get('at'))})"
+        tk.Label(meta, text=f"  ·  Fiabilidade: {rel}  ·  Fine-tune: {d.get('finetune', '')}", bg=alt,
+                 fg=THEME["muted"] if d.get("measured") or scope == "public" else THEME["warn"], font=("Segoe UI", 8)).pack(side=tk.LEFT)
         if origin == "editada":
             self.btn(meta, "↺ Repor", lambda: self.directive_revert(scope, d), padx=6, pady=0, font=("Segoe UI", 8)).pack(side=tk.RIGHT)
         for w in (row, top, num, txt, meta):
@@ -4180,7 +4236,18 @@ class GoisWindow(tk.Tk):
 
     def directive_detail(self):
         d = self._dir_rows.get(self._dir_sel) if self._dir_sel else None
-        text = (f"«{d['text']}»\n\nPorquê: {d.get('note') or '—'}\n\nComo testar: {d.get('test') or '—'}" if d
+        ev = (d or {}).get("eval") or {}
+        if d and d.get("measured") and ev:
+            meas = (f"Medido no sistema real: cumpre {fscore(ev.get('score'), 0)} % com a diretriz e {fscore(ev.get('baseline'), 0)} % sem ela "
+                    f"(efeito {fscore((ev.get('score') or 0) - (ev.get('baseline') or 0), 0, True)} pontos) · respostas cortadas pelo contexto: "
+                    f"{round((ev.get('truncated') or 0) * 100)} % · {ev.get('n', 0)} testes, há {self.age_txt(ev.get('at'))} · juiz {ev.get('judge') or '?'}")
+            for pr in (ev.get("probes") or [])[:6]:
+                meas += f"\n   • {fscore(pr.get('with'), 0)} % (sem: {fscore(pr.get('without'), 0)} %){' ✂' if pr.get('cut') else ''}  {short(pr.get('q', ''), 90)}"
+        elif d:
+            meas = "Ainda sem medição válida: carrega em 🧪 Medir para saber a fiabilidade e se precisa de fine-tune."
+        else:
+            meas = ""
+        text = (f"«{d['text']}»\n\n{meas}\n\nPorquê: {d.get('note') or '—'}\n\nComo testar: {d.get('test') or '—'}" if d
                 else "Clica numa diretriz para ver o porquê e como testá-la.\n\n" + self.DIRECTIVE_HELP)
         try:
             self.dir_detail.config(state=tk.NORMAL)
@@ -4226,6 +4293,39 @@ class GoisWindow(tk.Tk):
             self.flash(ok_msg, THEME["bot"], ms=6000)
 
         self.bg(lambda: self.api.call(method, path, body, timeout=40), done)
+
+    def directive_measure(self, scope, ids=None):
+        """Mede no servidor (em segundo plano) a fiabilidade e a necessidade de fine-tune; a lista atualiza-se sozinha."""
+        if not self.require_admin_ui():
+            return
+        nome = "admin" if scope == "admin" else "públicas"
+        what = "esta diretriz" if ids else f"todas as diretrizes {nome}"
+        if not messagebox.askyesno("Medir diretrizes", f"Medir {what} no sistema real?\n\nUsa o teu modelo (admin) ou os fornecedores (público) e "
+                                   "gasta tokens dos fornecedores nos pedidos de teste e no juiz. Pode demorar vários minutos.", parent=self):
+            return
+        self.directive_call("POST", f"/api/directives/{scope}/evaluate", {"ids": ids} if ids else {}, "🧪 Medição iniciada no servidor.",
+                            on_ok=self.dir_poll_start)
+
+    def dir_poll_start(self):
+        if getattr(self, "_dir_poll", None):
+            return
+        self._dir_poll = self.after(6000, self.dir_poll_tick)
+
+    def dir_poll_tick(self):
+        self._dir_poll = None
+        was = (self.prompts_data.get("eval") or {}).get("running")
+
+        def done(res, err):
+            if err or not isinstance(res, dict):
+                return
+            self.prompts_data = res
+            self.prompts_ui_fill()                      # se ainda estiver a correr, o preenchimento volta a agendar a consulta
+            ev = res.get("eval") or {}
+            if was and not ev.get("running"):
+                self.flash("⚠ Medição parou: " + str(ev["error"])[:120] if ev.get("error") else "🧪 Medição das diretrizes concluída.",
+                           THEME["danger"] if ev.get("error") else THEME["bot"], ms=10000)
+
+        self.bg(lambda: self.api.call("GET", "/api/prompts", timeout=40), done)
 
     def directive_remove(self, scope, d):
         short = d.get("text", "")
@@ -4289,30 +4389,18 @@ class GoisWindow(tk.Tk):
 
         sel = tk.Frame(win, bg=panel)
         sel.pack(fill=tk.X, padx=16, pady=(6, 0))
-        rel_cur = (d or {}).get("reliability_key", "media")
-        ft_cur = (d or {}).get("finetune_key", "na" if scope == "public" else "nao")
-        tk.Label(sel, text="Fiabilidade no modelo", bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w")
-        tk.Label(sel, text="Fine-tune", bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).grid(row=0, column=1, sticky="w", padx=(16, 0))
-        c_rel = ttk.Combobox(sel, state="readonly", width=18, values=[v for _k, v in self.RELIABILITY_OPTS])
-        c_ft = ttk.Combobox(sel, state="readonly", width=22, values=[v for _k, v in self.FINETUNE_OPTS])
-        c_rel.set(dict(self.RELIABILITY_OPTS).get(rel_cur, "Média"))
-        c_ft.set(dict(self.FINETUNE_OPTS).get(ft_cur, "N/A (terceiros)"))
-        c_rel.grid(row=1, column=0, sticky="w", pady=(2, 0))
-        c_ft.grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(2, 0))
         e_pos = None
         if not editing:
-            tk.Label(sel, text="Posição (1 = primeira; vazio = no fim)", bg=panel, fg=THEME["muted"],
-                     font=("Segoe UI", 9)).grid(row=0, column=2, sticky="w", padx=(16, 0))
+            tk.Label(sel, text="Posição (1 = primeira; vazio = no fim)", bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w")
             e_pos = tk.Entry(sel, width=8, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"], relief=tk.FLAT)
-            e_pos.grid(row=1, column=2, sticky="w", padx=(16, 0), pady=(2, 0), ipady=3)
+            e_pos.grid(row=1, column=0, sticky="w", pady=(2, 0), ipady=3)
+        tk.Label(win, text="A fiabilidade e o fine-tune não se escolhem: são medidos no sistema real com 🧪 Medir.", bg=panel, fg=THEME["muted"],
+                 font=("Segoe UI", 8)).pack(anchor=tk.W, padx=16, pady=(6, 0))
 
         label("Porquê (nota para ti — não vai para o modelo)")
         e_note = textbox(4, d.get("note", "") if editing else "")
         label("Como testar (não vai para o modelo)")
         e_test = textbox(3, d.get("test", "") if editing else "")
-
-        def key_of(opts, shown, default):
-            return next((k for k, v in opts if v == shown), default)
 
         def save():
             text = e_text.get("1.0", "end-1c").strip()
@@ -4323,8 +4411,6 @@ class GoisWindow(tk.Tk):
                 messagebox.showwarning("Diretriz", f"Máximo 1200 caracteres (tem {len(text)}).", parent=win)
                 return
             body = {"text": text,
-                    "reliability": key_of(self.RELIABILITY_OPTS, c_rel.get(), "media"),
-                    "finetune": key_of(self.FINETUNE_OPTS, c_ft.get(), "na"),
                     "note": e_note.get("1.0", "end-1c").strip(), "test": e_test.get("1.0", "end-1c").strip()}
             if e_pos is not None and e_pos.get().strip():
                 try:
