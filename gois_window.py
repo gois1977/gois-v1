@@ -1,4 +1,4 @@
-"""gois.v1 | Office & Command Center - Aplicação Desktop (v2.4)
+"""gois.v1 | Office & Command Center - Aplicação Desktop (v3.0, novo design)
 
 Corre sempre como Administrador do Windows (pede elevação UAC ao abrir).
 Tema claro/escuro, totais gois.v1/Mistral/Groq sempre no topo (do mais forte ao mais fraco), comparação ao vivo com gráficos, chat com histórico
@@ -61,27 +61,30 @@ SESSION_FILE = DATA_DIR / "multichats.json"
 LOCAL_SKILLS_FILE = DATA_DIR / "skills.json"          # skills criadas por ti
 KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"          # cópia local das lições da Sala de Aula
 
-APP_VERSION = "2.6"
+APP_VERSION = "3.0"
 STATE_BACKUP_FILE = DATA_DIR / "state_backup.json"      # cópia do estado do servidor (notas, tokens, limites) para repor após um reinício
 COMP_CACHE_FILE = DATA_DIR / "settings_cache.json"      # última leitura do servidor (mostra dados mesmo offline)
 HISTORY_FILE = DATA_DIR / "comparison_history.json"     # histórico dos totais para o gráfico de evolução
 
+# Identidade visual própria, inspirada nos painéis de IA modernos: neutros quentes (papel/carvão), terracota como cor da marca,
+# azul-ardósia e verde-sálvia como secundárias. Os nomes das chaves não mudaram, por isso tudo o que usa THEME[...] acompanha.
 THEMES = {
     "dark": {
-        "name": "dark", "bg": "#0d1117", "panel": "#161b22", "panel_alt": "#1c2330", "border": "#30363d",
-        "fg": "#e6edf3", "muted": "#8b949e", "user": "#58a6ff", "bot": "#3fb950", "btn": "#21262d",
-        "accent": "#238636", "accent_blue": "#1f6feb", "code_bg": "#010409", "code_fg": "#79c0ff",
-        "warn": "#d29922", "danger": "#f85149", "user_bg": "#16233a",
-        "s_gois": "#3fb950", "s_mistral": "#f0883e", "s_groq": "#f778ba",
+        "name": "dark", "bg": "#1f1e1d", "panel": "#2a2927", "panel_alt": "#34332f", "side": "#171716", "border": "#3d3b37",
+        "fg": "#f2f0e8", "muted": "#a9a79e", "user": "#e08a6a", "bot": "#93ad73", "btn": "#2f2e2b",
+        "accent": "#c6613f", "accent_blue": "#5b84b1", "code_bg": "#181817", "code_fg": "#e8c39e",
+        "warn": "#e0a458", "danger": "#e5604f", "user_bg": "#35302b",
+        "s_gois": "#d97757", "s_mistral": "#6a9bcc", "s_groq": "#93ad73",
     },
     "light": {
-        "name": "light", "bg": "#f6f8fa", "panel": "#ffffff", "panel_alt": "#eaeef2", "border": "#d0d7de",
-        "fg": "#1f2328", "muted": "#59636e", "user": "#0969da", "bot": "#1a7f37", "btn": "#eaeef2",
-        "accent": "#1a7f37", "accent_blue": "#0969da", "code_bg": "#f6f8fa", "code_fg": "#0550ae",
-        "warn": "#9a6700", "danger": "#cf222e", "user_bg": "#ddf4ff",
-        "s_gois": "#1a7f37", "s_mistral": "#bc4c00", "s_groq": "#bf3989",
+        "name": "light", "bg": "#faf9f5", "panel": "#ffffff", "panel_alt": "#f1efe7", "side": "#f0eee6", "border": "#e2dfd3",
+        "fg": "#1a1a18", "muted": "#6f6d66", "user": "#c6613f", "bot": "#5a7340", "btn": "#f1efe7",
+        "accent": "#c6613f", "accent_blue": "#3f6e9e", "code_bg": "#f5f4ee", "code_fg": "#9a4a2f",
+        "warn": "#a86a12", "danger": "#c0392b", "user_bg": "#f4e8e0",
+        "s_gois": "#c6613f", "s_mistral": "#3f6e9e", "s_groq": "#5a7340",
     },
 }
+FONT_UI, FONT_UI_B, FONT_SERIF = "Segoe UI", "Segoe UI Semibold", "Georgia"
 THEME = dict(THEMES["dark"])
 
 
@@ -583,8 +586,8 @@ class GoisWindow(tk.Tk):
         self.title(APP_NAME)
         self.cfg = self.load_config()
         set_theme(self.cfg.get("theme", "dark"))
-        self.geometry("1380x840")
-        self.minsize(1200, 700)
+        self.geometry("1520x900")
+        self.minsize(1280, 740)
         self.configure(bg=THEME["bg"])
         self.api = Api(self.cfg)
         self.sessions = self.load_sessions()
@@ -742,90 +745,264 @@ class GoisWindow(tk.Tk):
     def setup_styles(self):
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("TNotebook", background=THEME["bg"], borderwidth=0, tabmargins=[16, 8, 16, 0])
-        style.configure("TNotebook.Tab", background=THEME["panel"], foreground=THEME["muted"],
-                        padding=[16, 9], font=("Segoe UI Semibold", 9), borderwidth=0)
-        style.map("TNotebook.Tab", background=[("selected", THEME["accent_blue"]), ("active", THEME["panel_alt"])],
-                  foreground=[("selected", "#ffffff"), ("active", THEME["fg"])])
-        style.configure("Treeview", background=THEME["panel"], fieldbackground=THEME["panel"],
-                        foreground=THEME["fg"], rowheight=28, borderwidth=0, font=("Segoe UI", 9))
-        style.configure("Treeview.Heading", background=THEME["panel_alt"], foreground=THEME["fg"],
-                        font=("Segoe UI Semibold", 9), borderwidth=0, relief="flat")
-        style.map("Treeview", background=[("selected", THEME["accent_blue"])], foreground=[("selected", "#ffffff")])
-        style.map("Treeview.Heading", background=[("active", THEME["border"])])
-        style.configure("Vertical.TScrollbar", background=THEME["btn"], troughcolor=THEME["bg"], borderwidth=0,
-                        arrowcolor=THEME["muted"])
+        # Separadores escondidos: a navegação é a barra lateral (self.notebook continua a existir e a ser usado por dentro).
+        style.layout("Plain.TNotebook.Tab", [])
+        style.layout("Plain.TNotebook", [("Notebook.client", {"sticky": "nswe"})])
+        style.configure("Plain.TNotebook", background=THEME["bg"], borderwidth=0, lightcolor=THEME["bg"],
+                        darkcolor=THEME["bg"], bordercolor=THEME["bg"], tabmargins=0, padding=0)
+        style.configure("Treeview", background=THEME["panel"], fieldbackground=THEME["panel"], foreground=THEME["fg"],
+                        rowheight=30, borderwidth=0, bordercolor=THEME["panel"], lightcolor=THEME["panel"],
+                        darkcolor=THEME["panel"], font=(FONT_UI, 9))
+        style.configure("Treeview.Heading", background=THEME["panel_alt"], foreground=THEME["muted"],
+                        font=(FONT_UI_B, 9), borderwidth=0, relief="flat", padding=(8, 7))
+        style.map("Treeview", background=[("selected", THEME["accent"])], foreground=[("selected", "#ffffff")])
+        style.map("Treeview.Heading", background=[("active", THEME["border"])], foreground=[("active", THEME["fg"])])
+        # Barras de deslocamento finas, sem setas
+        for orient, sticky in (("Vertical", "ns"), ("Horizontal", "ew")):
+            name = f"{orient}.TScrollbar"
+            style.layout(name, [(f"{orient}.Scrollbar.trough", {"sticky": sticky, "children": [
+                (f"{orient}.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+            style.configure(name, background=THEME["border"], troughcolor=THEME["bg"], borderwidth=0, relief="flat",
+                            width=10, arrowsize=10, gripcount=0, lightcolor=THEME["border"], darkcolor=THEME["border"],
+                            bordercolor=THEME["bg"])
+            style.map(name, background=[("active", THEME["muted"]), ("pressed", THEME["muted"])])
         style.configure("TCombobox", fieldbackground=THEME["code_bg"], background=THEME["btn"], foreground=THEME["fg"],
-                        arrowcolor=THEME["fg"], bordercolor=THEME["border"])
+                        arrowcolor=THEME["fg"], bordercolor=THEME["border"], lightcolor=THEME["border"],
+                        darkcolor=THEME["border"], padding=4)
         style.map("TCombobox", fieldbackground=[("readonly", THEME["code_bg"])], foreground=[("readonly", THEME["fg"])])
         self.option_add("*TCombobox*Listbox.background", THEME["panel"])
         self.option_add("*TCombobox*Listbox.foreground", THEME["fg"])
-        self.option_add("*TCombobox*Listbox.selectBackground", THEME["accent_blue"])
+        self.option_add("*TCombobox*Listbox.selectBackground", THEME["accent"])
 
     def btn(self, parent, text, cmd, color=None, **kw):
-        return tk.Button(parent, text=text, command=cmd, bg=color or THEME["btn"], fg="#ffffff" if color else THEME["fg"],
-                         relief=tk.FLAT, bd=0, highlightthickness=0, activebackground=THEME["accent_blue"],
-                         activeforeground="#ffffff", font=kw.pop("font", ("Segoe UI Semibold", 9)), cursor="hand2",
-                         padx=kw.pop("padx", 12), pady=kw.pop("pady", 5), **kw)
+        """Botão plano com hover. color=... → botão cheio (ação); sem cor → secundário com contorno; ghost=True → sem contorno."""
+        ghost = kw.pop("ghost", False)
+        try:
+            pbg = parent.cget("bg")
+        except Exception:
+            pbg = THEME["bg"]
+        if color:
+            bg, fg, border = color, "#ffffff", color
+        elif ghost:
+            bg, fg, border = pbg, THEME["fg"], pbg
+        else:
+            bg, fg, border = THEME["btn"], THEME["fg"], THEME["border"]
+        b = tk.Button(parent, text=text, command=cmd, bg=bg, fg=fg, relief=tk.FLAT, bd=0, highlightthickness=1,
+                      highlightbackground=border, highlightcolor=border, activebackground=bg, activeforeground=fg,
+                      font=kw.pop("font", (FONT_UI_B, 9)), cursor="hand2",
+                      padx=kw.pop("padx", 14), pady=kw.pop("pady", 6), **kw)
+        filled = bool(color)
+
+        def enter(_e):
+            try:
+                b._rest = b.cget("bg")
+                b.config(bg=blend("#ffffff" if filled else THEME["fg"], b._rest, 0.14 if filled else 0.09))
+            except tk.TclError:
+                pass
+
+        def leave(_e):
+            try:
+                b.config(bg=getattr(b, "_rest", bg))
+            except tk.TclError:
+                pass
+
+        b.bind("<Enter>", enter)
+        b.bind("<Leave>", leave)
+        return b
 
     def card(self, parent, **kw):
         return tk.Frame(parent, bg=THEME["panel"], highlightbackground=THEME["border"], highlightthickness=1, **kw)
 
-    def make_scroll_area(self, parent, bg=None):
-        """Zona com scroll vertical (roda do rato incluída). Devolve (contentor a empacotar, frame interior onde se põem as linhas)."""
-        bg = bg or THEME["panel"]
-        wrap = tk.Frame(parent, bg=bg)
-        cv = tk.Canvas(wrap, bg=bg, highlightthickness=0)
-        vs = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=cv.yview)
-        cv.configure(yscrollcommand=vs.set)
-        vs.pack(side=tk.RIGHT, fill=tk.Y)
-        cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        inner = tk.Frame(cv, bg=bg)
-        win_id = cv.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda _e: cv.configure(scrollregion=cv.bbox("all")))
-        cv.bind("<Configure>", lambda e: cv.itemconfigure(win_id, width=e.width))
-
-        def wheel(e):
-            if inner.winfo_height() > cv.winfo_height():
-                cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
-
-        def enter(_e):
-            cv.bind_all("<MouseWheel>", wheel)
-
-        def leave(e):
-            try:
-                under = wrap.winfo_containing(e.x_root, e.y_root)
-            except (tk.TclError, KeyError):
-                under = None
-            if under is None or not str(under).startswith(str(wrap)):      # só larga a roda quando o rato saiu mesmo da zona
-                cv.unbind_all("<MouseWheel>")
-
-        wrap.bind("<Enter>", enter)
-        wrap.bind("<Leave>", leave)
-        return wrap, inner
-
     def kpi_card(self, parent, key, title, color=None, big=False, status=False):
         f = self.card(parent)
-        f.pack(side=tk.LEFT, padx=(0, 8), fill=tk.Y)
+        f.pack(side=tk.LEFT, padx=(0, 10), fill=tk.Y)
         self.kpi_frames[key] = f
-        top = tk.Frame(f, bg=THEME["panel"])
-        top.pack(fill=tk.X, padx=12, pady=(8, 0))
-        if color:
-            tk.Label(top, text="●", fg=color, bg=THEME["panel"], font=("Segoe UI", 10)).pack(side=tk.LEFT)
-        tl = tk.Label(top, text=title, fg=THEME["muted"], bg=THEME["panel"], font=("Segoe UI Semibold", 9))
-        tl.pack(side=tk.LEFT, padx=(4 if color else 0, 0))
+        if color:                                   # tira de cor do modelo, à esquerda do cartão
+            tk.Frame(f, bg=color, width=4).pack(side=tk.LEFT, fill=tk.Y)
+        body = tk.Frame(f, bg=THEME["panel"])
+        body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tl = tk.Label(body, text=title, fg=THEME["muted"], bg=THEME["panel"], font=(FONT_UI_B, 9))
+        tl.pack(anchor=tk.W, padx=14, pady=(10, 0))
         self.kpi_title[key] = tl
-        val = tk.Label(f, text="—", fg=color or THEME["fg"], bg=THEME["panel"], font=("Segoe UI Semibold", 22 if big else 14))
-        val.pack(anchor=tk.W, padx=12)
-        sub = tk.Label(f, text="", fg=THEME["muted"], bg=THEME["panel"], font=("Segoe UI", 8))
-        sub.pack(anchor=tk.W, padx=12, pady=(0, 0 if status else 8))
+        val = tk.Label(body, text="—", fg=THEME["fg"], bg=THEME["panel"], font=(FONT_SERIF, 26 if big else 17))
+        val.pack(anchor=tk.W, padx=14)
+        sub = tk.Label(body, text="", fg=THEME["muted"], bg=THEME["panel"], font=(FONT_UI, 8))
+        sub.pack(anchor=tk.W, padx=14, pady=(0, 0 if status else 10))
         self.kpi[key] = (val, sub)
         if status:
-            st = tk.Label(f, text="… a verificar chave e ligação", fg=THEME["muted"], bg=THEME["panel"],
-                          font=("Segoe UI Semibold", 8), cursor="hand2", wraplength=170, justify=tk.LEFT, anchor="w")
-            st.pack(anchor=tk.W, padx=12, pady=(0, 8))
+            st = tk.Label(body, text="… a verificar chave e ligação", fg=THEME["muted"], bg=THEME["panel"],
+                          font=(FONT_UI_B, 8), cursor="hand2", wraplength=180, justify=tk.LEFT, anchor="w")
+            st.pack(anchor=tk.W, padx=14, pady=(0, 10))
             st.bind("<Button-1>", lambda _e, k=key: self.show_model_health(k))
             self.kpi_status[key] = st
+
+    def side_stat(self, parent, key, title, bar=False):
+        """Pequena estatística da barra lateral; regista (valor, subtítulo) em self.kpi como os cartões do topo."""
+        bg = THEME["side"]
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill=tk.X, padx=18, pady=(7, 0))
+        head = tk.Frame(row, bg=bg)
+        head.pack(fill=tk.X)
+        tl = tk.Label(head, text=title, bg=bg, fg=THEME["muted"], font=(FONT_UI, 8))
+        tl.pack(side=tk.LEFT)
+        val = tk.Label(head, text="—", bg=bg, fg=THEME["fg"], font=(FONT_UI_B, 10))
+        val.pack(side=tk.RIGHT)
+        if bar:
+            cv = tk.Canvas(row, height=5, bg=THEME["border"], highlightthickness=0, bd=0)
+            cv.pack(fill=tk.X, pady=(4, 0))
+            self.side_bars[key] = cv
+        sub = tk.Label(row, text="", bg=bg, fg=THEME["muted"], font=(FONT_UI, 8), anchor="w", justify=tk.LEFT, wraplength=196)
+        sub.pack(fill=tk.X)
+        self.kpi[key] = (val, sub)
+        self.kpi_title[key] = tl
+
+    def update_side_bars(self):
+        cap = self.server_settings.get("capacity") or {}
+        tok = self.server_settings.get("tokens") or {}
+        data = {"capacity": (cap.get("total_used", 0), cap.get("total_capacity", 0)),
+                "tokens": (tok.get("used_today", 0), tok.get("daily_limit", 0))}
+        for key, (used, total) in data.items():
+            cv = self.side_bars.get(key)
+            if cv is None:
+                continue
+            try:
+                cv.delete("all")
+                w = cv.winfo_width() if cv.winfo_width() > 1 else 200
+                if total:
+                    frac = max(0.0, min(1.0, float(used or 0) / float(total)))
+                    col = THEME["bot"] if frac < 0.7 else (THEME["warn"] if frac < 0.9 else THEME["danger"])
+                    cv.create_rectangle(0, 0, w * frac, 5, fill=col, outline="")
+            except (tk.TclError, ValueError, TypeError):
+                pass
+
+    # ---------------- navegação ----------------
+    NAV_ITEMS = (
+        ("💬", "Chat & Histórico", "Chat", "Conversa com o teu modelo, com histórico pesquisável e anexos"),
+        ("📊", "Comparação Live", "Comparação ao vivo", "gois.v1 contra Mistral e Groq, com notas dadas por um juiz"),
+        ("🏫", "Sala de Aula", "Sala de Aula", "Estudo autónomo, lições e afinação do modelo (Colab)"),
+        ("🧠", "Skills", "Skills", "Conhecimento reutilizável integrado nas respostas"),
+        ("🛠", "Sistema", "Sistema", "Servidor, fornecedores, chaves e diagnóstico"),
+        ("🤖", "Modelo próprio", "Modelo próprio", "LM Studio, túnel e modelo local"),
+        ("📜", "Diretrizes", "Diretrizes", "As regras que o modelo recebe em cada pedido"),
+    )
+
+    def make_nav_item(self, parent, i, icon, name):
+        bg = THEME["side"]
+        row = tk.Frame(parent, bg=bg, cursor="hand2")
+        row.pack(fill=tk.X, pady=1)
+        ind = tk.Frame(row, bg=bg, width=3)
+        ind.pack(side=tk.LEFT, fill=tk.Y)
+        ic = tk.Label(row, text=icon, bg=bg, fg=THEME["muted"], font=("Segoe UI Emoji", 11), width=3, cursor="hand2")
+        ic.pack(side=tk.LEFT, pady=7)
+        tx = tk.Label(row, text=name, bg=bg, fg=THEME["muted"], font=(FONT_UI_B, 10), anchor="w", cursor="hand2")
+        tx.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        item = {"row": row, "ind": ind, "icon": ic, "text": tx}
+        self.nav_rows.append(item)
+
+        def paint(hover):
+            on = self._nav_index == i
+            col = THEME["panel_alt"] if (on or hover) else bg
+            for w in (row, ic, tx):
+                w.config(bg=col)
+            ind.config(bg=THEME["accent"] if on else col)
+            tx.config(fg=THEME["fg"] if (on or hover) else THEME["muted"])
+            ic.config(fg=THEME["fg"] if (on or hover) else THEME["muted"])
+
+        item["paint"] = paint
+        for w in (row, ic, tx):
+            w.bind("<Button-1>", lambda _e, k=i: self.nav_select(k))
+            w.bind("<Enter>", lambda _e: paint(True))
+            w.bind("<Leave>", lambda _e: paint(False))
+
+    def nav_select(self, i):
+        try:
+            self.notebook.select(i)
+        except tk.TclError:
+            return
+        self.refresh_nav()
+
+    def refresh_nav(self):
+        try:
+            self._nav_index = self.notebook.index(self.notebook.select())
+        except tk.TclError:
+            return
+        for item in self.nav_rows:
+            try:
+                item["paint"](False)
+            except tk.TclError:
+                pass
+        _ic, _name, title, desc = self.NAV_ITEMS[self._nav_index]
+        try:
+            self.page_title.config(text=title)
+            self.page_sub.config(text=desc)
+        except tk.TclError:
+            pass
+
+    def open_palette(self, _e=None):
+        """Ctrl+K: procura rápida de páginas e ações."""
+        old = getattr(self, "_pal", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.destroy()
+        except tk.TclError:
+            pass
+        actions = [(f"{ic}   Ir para {name}", (lambda k=i: self.nav_select(k))) for i, (ic, name, *_r) in enumerate(self.NAV_ITEMS)]
+        actions += [("🚀   Atualizar modelo (Colab)", self.update_model_colab), ("🧪   Testar Colab", self.test_colab),
+                    ("📦   Exportar dataset", self.export_dataset), ("🔄   Reconectar ao servidor", self.check_connection),
+                    ("⬆   Sincronizar skills", self.sync_skills), ("🌗   Alternar tema claro / escuro", self.toggle_theme),
+                    ("⚙   Definições", self.open_settings)]
+        win = tk.Toplevel(self)
+        self._pal = win
+        win.title("Procurar")
+        win.configure(bg=THEME["panel"])
+        win.transient(self)
+        w, h = 580, 380
+        win.geometry(f"{w}x{h}+{self.winfo_rootx() + max(0, (self.winfo_width() - w) // 2)}+{self.winfo_rooty() + 110}")
+        ent = tk.Entry(win, font=(FONT_UI, 13), bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"],
+                       relief=tk.FLAT, highlightthickness=1, highlightbackground=THEME["border"], highlightcolor=THEME["accent"])
+        ent.pack(fill=tk.X, padx=14, pady=(14, 8), ipady=8)
+        lb = tk.Listbox(win, font=(FONT_UI, 11), bg=THEME["panel"], fg=THEME["fg"], selectbackground=THEME["accent"],
+                        selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=0, activestyle="none", bd=0)
+        lb.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
+        shown = []
+
+        def refill(_e=None):
+            q = ent.get().strip().lower()
+            lb.delete(0, tk.END)
+            shown.clear()
+            for label, fn in actions:
+                if q in label.lower():
+                    shown.append(fn)
+                    lb.insert(tk.END, "  " + label)
+            if shown:
+                lb.selection_set(0)
+
+        def run(_e=None):
+            sel = lb.curselection()
+            if not sel:
+                return
+            fn = shown[sel[0]]
+            win.destroy()
+            self.after(60, fn)
+
+        def move(d):
+            sel = lb.curselection()
+            if not shown:
+                return "break"
+            k = max(0, min(len(shown) - 1, (sel[0] if sel else 0) + d))
+            lb.selection_clear(0, tk.END)
+            lb.selection_set(k)
+            lb.see(k)
+            return "break"
+
+        ent.bind("<KeyRelease>", lambda e: refill() if e.keysym not in ("Up", "Down", "Return", "Escape") else None)
+        ent.bind("<Down>", lambda _e: move(1))
+        ent.bind("<Up>", lambda _e: move(-1))
+        ent.bind("<Return>", run)
+        lb.bind("<Double-Button-1>", run)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        refill()
+        ent.focus_set()
 
     # ---------------- UI base ----------------
     def build_ui(self):
@@ -833,52 +1010,95 @@ class GoisWindow(tk.Tk):
         self.kpi_status = {}
         self.kpi_title = {}
         self.kpi_frames = {}
+        self.side_bars = {}
+        self.nav_rows = []
+        self._nav_index = 0
         self._kpi_order = None
         self.lamps = []
-        header = tk.Frame(self, bg=THEME["panel"], height=54, highlightbackground=THEME["border"], highlightthickness=1)
-        header.pack(side=tk.TOP, fill=tk.X)
-        header.pack_propagate(False)
-        tk.Label(header, text=" g ", bg=THEME["accent"], fg="#ffffff", font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT, padx=(16, 8), pady=10)
-        tk.Label(header, text="gois.v1", bg=THEME["panel"], fg=THEME["fg"], font=("Segoe UI Semibold", 13)).pack(side=tk.LEFT)
-        self.model_lamp = self.make_lamp(header, THEME["panel"], 210, 30)
-        self.model_lamp.pack(side=tk.LEFT, padx=(10, 0))
-        tk.Label(header, text="Office & Command Center", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=8)
-        self.btn(header, "⚙ Definições", self.open_settings).pack(side=tk.RIGHT, padx=(6, 14), pady=10)
-        self.theme_btn = self.btn(header, "☀ Claro" if THEME["name"] == "dark" else "🌙 Escuro", self.toggle_theme)
-        self.theme_btn.pack(side=tk.RIGHT, padx=6, pady=10)
-        self.status_lbl = tk.Label(header, text="⏳ a ligar…", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI Semibold", 9))
-        self.status_lbl.pack(side=tk.RIGHT, padx=10)
-        self.live_lbl = tk.Label(header, text="● …", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI Semibold", 9))
-        self.live_lbl.pack(side=tk.RIGHT, padx=10)
-        self.flash_lbl = tk.Label(header, text="", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 9))
-        self.flash_lbl.pack(side=tk.RIGHT, padx=10)
+        root = tk.Frame(self, bg=THEME["bg"])
+        root.pack(fill=tk.BOTH, expand=True)
+        side = tk.Frame(root, bg=THEME["side"], width=240)
+        side.pack(side=tk.LEFT, fill=tk.Y)
+        side.pack_propagate(False)
+        tk.Frame(root, bg=THEME["border"], width=1).pack(side=tk.LEFT, fill=tk.Y)
+        main = tk.Frame(root, bg=THEME["bg"])
+        main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # ---- barra lateral: marca, estado do modelo, navegação, estatísticas de hoje, controlos ----
+        sbg = THEME["side"]
+        brand = tk.Frame(side, bg=sbg)
+        brand.pack(fill=tk.X, padx=18, pady=(22, 2))
+        tk.Label(brand, text="g", bg=THEME["accent"], fg="#ffffff", font=(FONT_SERIF, 16, "bold"), width=2).pack(side=tk.LEFT)
+        names = tk.Frame(brand, bg=sbg)
+        names.pack(side=tk.LEFT, padx=10)
+        tk.Label(names, text="gois.v1", bg=sbg, fg=THEME["fg"], font=(FONT_SERIF, 17)).pack(anchor="w")
+        tk.Label(names, text="Command Center", bg=sbg, fg=THEME["muted"], font=(FONT_UI, 8)).pack(anchor="w")
+        self.model_lamp = self.make_lamp(side, sbg, 214, 30)
+        self.model_lamp.pack(anchor="w", padx=(14, 0), pady=(12, 6))
+        tk.Frame(side, bg=THEME["border"], height=1).pack(fill=tk.X, padx=14, pady=(2, 8))
+        nav = tk.Frame(side, bg=sbg)
+        nav.pack(fill=tk.X, padx=10)
+        for i, (icon, name, _t, _d) in enumerate(self.NAV_ITEMS):
+            self.make_nav_item(nav, i, icon, name)
+
+        foot = tk.Frame(side, bg=sbg)                      # (empacotado de baixo para cima)
+        foot.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(8, 14))
         if sys.platform == "win32":
             ok = is_windows_admin()
-            tk.Label(header, text="🛡 Administrador" if ok else "⚠ sem Administrador", bg=THEME["panel"],
-                     fg=THEME["bot"] if ok else THEME["warn"], font=("Segoe UI Semibold", 9)).pack(side=tk.RIGHT, padx=10)
+            tk.Label(foot, text="🛡 Administrador" if ok else "⚠ sem Administrador", bg=sbg,
+                     fg=THEME["bot"] if ok else THEME["warn"], font=(FONT_UI_B, 9)).pack(anchor="w", padx=6, pady=(0, 6))
+        ctrl = tk.Frame(foot, bg=sbg)
+        ctrl.pack(fill=tk.X)
+        self.theme_btn = self.btn(ctrl, "☀ Claro" if THEME["name"] == "dark" else "🌙 Escuro", self.toggle_theme, ghost=True, padx=10)
+        self.theme_btn.pack(side=tk.LEFT)
+        self.btn(ctrl, "⚙ Definições", self.open_settings, ghost=True, padx=10).pack(side=tk.RIGHT)
 
-        # barra de estado (rodapé)
-        bar = tk.Frame(self, bg=THEME["panel"], highlightbackground=THEME["border"], highlightthickness=1)
+        stats = tk.Frame(side, bg=sbg)
+        stats.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 4))
+        tk.Frame(stats, bg=THEME["border"], height=1).pack(fill=tk.X, padx=14, pady=(0, 10))
+        tk.Label(stats, text="HOJE", bg=sbg, fg=THEME["muted"], font=(FONT_UI_B, 8)).pack(anchor="w", padx=18)
+        self.side_stat(stats, "capacity", "Capacidade restante (estim.)", bar=True)
+        self.side_stat(stats, "tokens", "Tokens usados", bar=True)
+        self.side_stat(stats, "lessons", "Lições")
+        self.side_stat(stats, "skills", "Skills")
+
+        # ---- barra superior: título da página + estado ao vivo ----
+        top = tk.Frame(main, bg=THEME["bg"])
+        top.pack(side=tk.TOP, fill=tk.X, padx=24, pady=(18, 4))
+        left = tk.Frame(top, bg=THEME["bg"])
+        left.pack(side=tk.LEFT)
+        self.page_title = tk.Label(left, text="", bg=THEME["bg"], fg=THEME["fg"], font=(FONT_SERIF, 22))
+        self.page_title.pack(anchor="w")
+        self.page_sub = tk.Label(left, text="", bg=THEME["bg"], fg=THEME["muted"], font=(FONT_UI, 9))
+        self.page_sub.pack(anchor="w")
+        self.btn(top, "🔎  Procurar   Ctrl+K", self.open_palette).pack(side=tk.RIGHT, pady=4)
+        self.status_lbl = tk.Label(top, text="⏳ a ligar…", bg=THEME["bg"], fg=THEME["muted"], font=(FONT_UI_B, 9))
+        self.status_lbl.pack(side=tk.RIGHT, padx=14)
+        self.live_lbl = tk.Label(top, text="● …", bg=THEME["bg"], fg=THEME["muted"], font=(FONT_UI_B, 9))
+        self.live_lbl.pack(side=tk.RIGHT, padx=6)
+        self.flash_lbl = tk.Label(top, text="", bg=THEME["bg"], fg=THEME["muted"], font=(FONT_UI, 9))
+        self.flash_lbl.pack(side=tk.RIGHT, padx=10)
+
+        # ---- rodapé ----
+        bar = tk.Frame(main, bg=THEME["bg"])
         bar.pack(side=tk.BOTTOM, fill=tk.X)
-        tk.Label(bar, text=f"📁 {DATA_DIR}", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=12, pady=3)
-        self.foot_r = tk.Label(bar, text="", bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 8))
-        self.foot_r.pack(side=tk.RIGHT, padx=12)
+        tk.Frame(bar, bg=THEME["border"], height=1).pack(fill=tk.X)
+        tk.Label(bar, text=f"📁 {DATA_DIR}", bg=THEME["bg"], fg=THEME["muted"], font=(FONT_UI, 8)).pack(side=tk.LEFT, padx=24, pady=4)
+        self.foot_r = tk.Label(bar, text="", bg=THEME["bg"], fg=THEME["muted"], font=(FONT_UI, 8))
+        self.foot_r.pack(side=tk.RIGHT, padx=24)
 
-        # totais gerais sempre visíveis
-        strip = tk.Frame(self, bg=THEME["bg"])
-        strip.pack(side=tk.TOP, fill=tk.X, padx=16, pady=(10, 2))
+        # ---- totais dos modelos: sempre visíveis, do mais forte ao mais fraco ----
+        strip = tk.Frame(main, bg=THEME["bg"])
+        strip.pack(side=tk.TOP, fill=tk.X, padx=24, pady=(8, 8))
         for key, name, _f in COMPARE_MODELS:
             self.kpi_card(strip, key, f"{name} · total geral", series_color(key), big=True, status=True)
         self.kpi_sep = tk.Frame(strip, bg=THEME["border"], width=1)
-        self.kpi_sep.pack(side=tk.LEFT, fill=tk.Y, padx=(2, 10), pady=4)
+        self.kpi_sep.pack(side=tk.LEFT, fill=tk.Y, padx=(2, 12), pady=6)
         self.kpi_card(strip, "par_mis", "Paridade vs Mistral")
         self.kpi_card(strip, "par_grq", "Paridade vs Groq")
-        self.kpi_card(strip, "lessons", "Lições")
-        self.kpi_card(strip, "skills", "Skills")
-        self.kpi_card(strip, "capacity", "Capacidade restante hoje (estim.)")
-        self.kpi_card(strip, "tokens", "Tokens hoje")
 
-        self.notebook = ttk.Notebook(self)
+        # ---- páginas (o ttk.Notebook fica sem separadores; a barra lateral escolhe a página) ----
+        self.notebook = ttk.Notebook(main, style="Plain.TNotebook")
         self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.tab_chat = tk.Frame(self.notebook, bg=THEME["bg"])
         self.tab_comp = tk.Frame(self.notebook, bg=THEME["bg"])
@@ -887,13 +1107,9 @@ class GoisWindow(tk.Tk):
         self.tab_sys = tk.Frame(self.notebook, bg=THEME["bg"])
         self.tab_local = tk.Frame(self.notebook, bg=THEME["bg"])
         self.tab_prompts = tk.Frame(self.notebook, bg=THEME["bg"])
-        self.notebook.add(self.tab_chat, text="💬 Chat & Histórico")
-        self.notebook.add(self.tab_comp, text="📊 Comparação Live")
-        self.notebook.add(self.tab_class, text="🏫 Sala de Aula")
-        self.notebook.add(self.tab_skills, text="🧠 Skills")
-        self.notebook.add(self.tab_sys, text="🛠 Sistema")
-        self.notebook.add(self.tab_local, text="🤖 Modelo próprio")
-        self.notebook.add(self.tab_prompts, text="📜 Diretrizes")
+        for frame, (icon, name, _t, _d) in zip((self.tab_chat, self.tab_comp, self.tab_class, self.tab_skills,
+                                               self.tab_sys, self.tab_local, self.tab_prompts), self.NAV_ITEMS):
+            self.notebook.add(frame, text=f"{icon} {name}")
 
         self.build_chat_tab()
         self.build_comparison_tab()
@@ -903,6 +1119,12 @@ class GoisWindow(tk.Tk):
         self.build_local_tab()
         self.build_prompts_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+        self.refresh_nav()
+        # atalhos: Ctrl+K procura; Ctrl+1…7 muda de página
+        self.bind_all("<Control-k>", self.open_palette)
+        self.bind_all("<Control-K>", self.open_palette)
+        for n in range(1, len(self.NAV_ITEMS) + 1):
+            self.bind_all(f"<Control-Key-{n}>", lambda _e, k=n - 1: self.nav_select(k))
 
     def toggle_theme(self):
         name = "light" if THEME["name"] == "dark" else "dark"
@@ -1018,6 +1240,7 @@ class GoisWindow(tk.Tk):
             "3) Aqui: ⚙ Definições > Token de administrador = a mesma palavra-passe", parent=self)
 
     def on_tab_changed(self, _e=None):
+        self.refresh_nav()
         tab = self.notebook.index(self.notebook.select())
         if tab in (1, 2) and self.is_admin:
             self.refresh_classroom()
@@ -2866,13 +3089,14 @@ class GoisWindow(tk.Tk):
                 self.kpi["capacity"][0].config(text=self.fmt_tok(cap.get("total_remaining", 0)))
                 names = [n for n, r in (cap.get("providers") or {}).items() if r.get("capacity")]
                 self.kpi["capacity"][1].config(
-                    text=f"de {self.fmt_tok(cap['total_capacity'])} · {', '.join(names)} (estimativa)")
+                    text=f"de {self.fmt_tok(cap['total_capacity'])} · {', '.join(names)}")
             else:
                 self.kpi["capacity"][0].config(text="—")
                 self.kpi["capacity"][1].config(text="define-a na Sala de Aula")
             used = int(tok.get("used_today", 0) or 0)
             self.kpi["tokens"][0].config(text=f"{used:,}".replace(",", "."))
             self.kpi["tokens"][1].config(text="limite " + (f"{int(tok.get('daily_limit', 0)):,}".replace(",", ".") if tok.get("daily_limit") else "∞"))
+            self.update_side_bars()
         except (tk.TclError, KeyError):
             pass
 
@@ -3543,7 +3767,16 @@ class GoisWindow(tk.Tk):
                 lines.append(f"❌ Dataset no servidor: {err}")
             else:
                 n = res.get("count", 0)
-                lines.append(f"✅ Dataset no servidor: {n} exemplos prontos ({res.get('skipped', 0)} lições ignoradas)")
+                lines.append(f"✅ Dataset no servidor: {n} exemplos prontos")
+                if "lessons" in res:
+                    lines.append(f"      {res.get('lessons', 0)} lições + {res.get('skills', 0)} skills + {res.get('directives', 0)} diretrizes")
+                if res.get("skipped"):
+                    lines.append(f"      {res['skipped']} itens ignorados ({res.get('skipped_lessons', 0)} lições, {res.get('skipped_skills', 0)} skills)")
+                    names = {"curta": "texto curto", "repetida": "título repetido", "sem_titulo": "sem título"}
+                    for kind, label in (("lessons", "lições"), ("skills", "skills")):
+                        why = (res.get("skipped_why") or {}).get(kind) or {}
+                        if why:
+                            lines.append(f"         {label}: " + ", ".join(f"{v} com {names.get(k, k)}" for k, v in why.items()))
                 if n < 50:
                     lines.append("⚠ Poucos exemplos: com menos de ~50 o afinamento quase não muda o modelo.")
             lines.append("\nNota: daqui não consigo ver a tua sessão do Colab. Confirma lá que o segredo "
@@ -3580,6 +3813,8 @@ class GoisWindow(tk.Tk):
                     return
             else:
                 n = res.get("count", 0)
+                if "lessons" in res:
+                    n = f"{n} ({res.get('lessons', 0)} lições · {res.get('skills', 0)} skills · {res.get('directives', 0)} diretrizes)"
             webbrowser.open(self.colab_url())
             self.cfg["last_train_lessons"] = len(self.kb)
             self.save_config()
@@ -4490,10 +4725,19 @@ class GoisWindow(tk.Tk):
                             merged[k["id"]] = k
                 except Exception:
                     pass
+                try:  # dataset completo (lições + skills + diretrizes) montado pelo servidor: é o mesmo que o Colab recebe
+                    full = self.api.call("GET", "/api/dataset", timeout=80)
+                    if full.get("examples"):
+                        return {"full": full["examples"]}
+                except Exception:
+                    pass
             return sorted(merged.values(), key=lambda k: k.get("created", ""))
 
         def done(res, err):
-            rows, skipped = build_dataset_rows(res or [])
+            if isinstance(res, dict) and res.get("full"):
+                rows, skipped = res["full"], 0
+            else:
+                rows, skipped = build_dataset_rows(res or [])
             if err or not rows:
                 messagebox.showinfo("Exportar dataset", "Ainda não há lições suficientes para exportar.\n"
                                     "(Cada lição precisa de título e de pelo menos 200 caracteres.)")
