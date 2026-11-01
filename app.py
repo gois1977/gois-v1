@@ -13,6 +13,11 @@ DIRETRIZES GERIDAS (novo): as diretrizes do prompt (admin / público) já não s
   reverter cada uma (GET/PUT /api/directives, POST /api/directives/{admin|public}, PUT|DELETE /api/directives/{âmbito}/{id},
   POST .../{id}/revert e POST /api/directives/{âmbito}/revert). Ficam gravadas em gois_db.json.
 
+LISTAS DE MODELOS POR FORÇA REAL (novo na 6.5): as listas de modelos (Mistral, Groq) vêm ordenadas do mais forte ao mais fraco
+  segundo dados ONLINE (Artificial Analysis Intelligence Index; GET /api/model-rankings), nunca pelos teus benchmarks.
+  Precisa de ARTIFICIAL_ANALYSIS_API_KEY (grátis); sem ela usa uma estimativa pelo tamanho do modelo, marcada como tal.
+  /api/job e /api/provider-models dizem que modelos estão a fazer benchmark agora (job.models / benchmarking), para o círculo verde.
+
 ENVIRONMENT GERIDO (novo na 6.4): GET /api/env lista TODAS as variáveis do serviço (Render > Environment, com valores sensíveis
   mascarados), GET /api/env/{NOME} mostra o valor, PUT /api/env/{NOME} cria/atualiza e DELETE /api/env/{NOME} remove.
   Precisa de RENDER_API_KEY + RENDER_SERVICE_ID; sem elas só se vêem as variáveis do app e só as chaves dos fornecedores se mudam.
@@ -36,6 +41,7 @@ Modelo próprio (LM Studio / qualquer servidor compatível com a API OpenAI):
 """
 import os
 import re
+import math
 import json
 import time
 import uuid
@@ -56,7 +62,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger("uvicorn.error")
 
-VERSION = "6.4.0"
+VERSION = "6.5.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE_DIR / "data"))
 DB_FILE = DATA_DIR / "gois_db.json"
@@ -135,18 +141,18 @@ DB_SKILLS: list = []
 DB_SETTINGS: dict = default_settings()
 CLASSROOM_TASK = None
 JOB_LOCK = asyncio.Lock()
-CURRENT_JOB = {"kind": None, "category": None, "since": None}   # o que o servidor está a fazer agora (learn / benchmark)
+CURRENT_JOB = {"kind": None, "category": None, "since": None, "models": []}   # o que o servidor está a fazer agora (learn / benchmark)
 
 
 @asynccontextmanager
 async def job_slot(kind: str, category: str):
     """Como JOB_LOCK, mas regista o que está a correr para o painel mostrar «a estudar» / «a executar benchmark»."""
     async with JOB_LOCK:
-        CURRENT_JOB.update(kind=kind, category=category, since=now_iso())
+        CURRENT_JOB.update(kind=kind, category=category, since=now_iso(), models=[])
         try:
             yield
         finally:
-            CURRENT_JOB.update(kind=None, category=None, since=None)
+            CURRENT_JOB.update(kind=None, category=None, since=None, models=[])
 
 
 def save_db() -> None:
@@ -1287,6 +1293,8 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
                 targets += [(prov, m) for m in tracked_models()[prov]]
         if not targets:
             raise RuntimeError("Nenhum fornecedor de referência tem chave (MISTRAL_API_KEY / GROQ_API_KEY no Render).")
+        # os painéis mostram um círculo verde em cada modelo que está a fazer este benchmark ("gois" + "Fornecedor|modelo")
+        CURRENT_JOB["models"] = ["gois"] + [mkey(p, m) for p, m in targets]
 
         sem = asyncio.Semaphore(4)      # a cadência fina por fornecedor está em gated_try (Mistral ~1 pedido/1,4 s)
 
@@ -2207,6 +2215,110 @@ async def comparison_benchmark(request: Request):
     return {"benchmark": result, "settings": settings_view()}
 
 
+# --------------------------------------------------------------------------- #
+# Força REAL dos modelos, vinda de bases de dados online (Artificial Analysis). NÃO usa os teus benchmarks.
+# Chave grátis em https://artificialanalysis.ai -> variável ARTIFICIAL_ANALYSIS_API_KEY (Render > Environment).
+# Sem chave (ou sem rede) as listas usam uma ESTIMATIVA pelo tamanho/escalão do nome, marcada como "estimativa".
+# Dados: Artificial Analysis (artificialanalysis.ai) — a atribuição é obrigatória nos termos deles.
+# --------------------------------------------------------------------------- #
+AA_URL = "https://artificialanalysis.ai/api/v2/language/models/free"
+AA_SOURCE = "Artificial Analysis"
+RANK_TTL = 6 * 3600
+RANK_CACHE: dict = {"t": 0.0, "models": [], "error": "", "fetched": "", "source": AA_SOURCE}
+_RANK_STOP = {"latest", "versatile", "instant", "preview", "it", "chat", "hf", "fp8", "bf16", "free", "beta", "exp", "experimental"}
+
+
+def _aa_key() -> str:
+    return (os.environ.get("ARTIFICIAL_ANALYSIS_API_KEY") or RUNTIME_KEYS.get("ARTIFICIAL_ANALYSIS_API_KEY") or "").strip()
+
+
+def _rank_tokens(text: str) -> set:
+    t = re.sub(r"(?<=\d)\.(?=\d)", "-", str(text or "").lower())     # 3.3 -> 3-3 (como nos slugs deles)
+    return {x for x in re.split(r"[^a-z0-9]+", t) if x}
+
+
+async def fetch_online_ranking(force: bool = False) -> dict:
+    """Lê (com cache de 6 h) a lista de modelos com o Intelligence Index. Em caso de erro mantém a última lista boa."""
+    now = time.time()
+    if not force and RANK_CACHE["models"] and now - RANK_CACHE["t"] < RANK_TTL:
+        return RANK_CACHE
+    key = _aa_key()
+    if not key:
+        RANK_CACHE["error"] = "falta ARTIFICIAL_ANALYSIS_API_KEY (chave grátis em artificialanalysis.ai)"
+        return RANK_CACHE
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=10.0)) as client:
+            r = await client.get(AA_URL, headers={"x-api-key": key, "Accept": "application/json"})
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}")
+        models = []
+        for m in (r.json().get("data") or []):
+            score = ((m.get("evaluations") or {}).get("artificial_analysis_intelligence_index"))
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                continue
+            slug, name = str(m.get("slug") or ""), str(m.get("name") or "")
+            models.append({"slug": slug, "name": name, "creator": str((m.get("model_creator") or {}).get("name") or ""),
+                           "score": float(score), "tokens": _rank_tokens(slug + " " + name)})
+        if not models:
+            raise RuntimeError("resposta sem modelos")
+        RANK_CACHE.update(t=now, models=models, error="", fetched=now_iso())
+    except Exception as e:
+        RANK_CACHE["error"] = f"{type(e).__name__}: {e}"[:160]
+        RANK_CACHE["t"] = now - RANK_TTL + 600          # tenta de novo daqui a 10 min; entretanto fica a última lista boa
+    return RANK_CACHE
+
+
+def _match_online(model_id: str):
+    """O modelo online que corresponde a este id do fornecedor (todos os termos do id têm de existir; ganha o mais parecido e, a seguir, o mais forte)."""
+    q = _rank_tokens(str(model_id).split("/")[-1]) - _RANK_STOP
+    if not q:
+        return None
+    best = None
+    for m in RANK_CACHE["models"]:
+        if q <= m["tokens"]:
+            k = (len(q) / len(m["tokens"]), m["score"])
+            if best is None or k > best[0]:
+                best = (k, m)
+    return best[1] if best else None
+
+
+def _estimate_strength(model_id: str) -> float:
+    """Estimativa (escala parecida com o Intelligence Index) para quando não há dados online: tamanho em B e escalão do nome."""
+    s = str(model_id).lower()
+    sizes = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)\s*b(?![a-z])", s)]
+    if sizes:
+        return round(min(62.0, 8 + 7 * math.log2(max(sizes) + 1)), 1)
+    for word, v in (("large", 50.0), ("medium", 38.0), ("small", 26.0), ("mini", 18.0), ("tiny", 15.0), ("nano", 14.0)):
+        if word in s:
+            return v
+    return 25.0
+
+
+async def ranked_models(ids, force: bool = False) -> list:
+    """Ids do fornecedor ordenados do MAIS FORTE ao MAIS FRACO por dados online, com rank 1..n.
+    Os que não aparecem na base online (modelo novo / nome diferente) vão para o fim, entre si por estimativa do tamanho:
+    estimativa e nota online estão em escalas diferentes, por isso nunca se misturam. Sem dados online, ordena tudo pela estimativa."""
+    await fetch_online_ranking(force)
+    found, rest = [], []
+    for mid in ids:
+        mt = _match_online(mid)
+        if mt:
+            found.append({"id": mid, "strength": round(mt["score"], 1), "strength_src": "online", "strength_ref": mt["name"]})
+        else:
+            rest.append({"id": mid, "strength": _estimate_strength(mid), "strength_src": "estimativa", "strength_ref": ""})
+    found.sort(key=lambda r: (-r["strength"], r["id"]))
+    rest.sort(key=lambda r: (-r["strength"], r["id"]))
+    rows = found + rest
+    for i, r in enumerate(rows, 1):
+        r["rank"] = i
+    return rows
+
+
+def ranking_meta() -> dict:
+    return {"source": AA_SOURCE, "url": "https://artificialanalysis.ai", "fetched": RANK_CACHE["fetched"], "error": RANK_CACHE["error"],
+            "count": len(RANK_CACHE["models"]), "live": bool(RANK_CACHE["models"]), "key_set": bool(_aa_key())}
+
+
 async def list_provider_models(name: str, force: bool = False) -> dict:
     """Lista REAL de modelos de chat que o fornecedor tem (pedida à API dele, com cache de 10 min)."""
     now = time.time()
@@ -2245,18 +2357,32 @@ async def list_provider_models(name: str, force: bool = False) -> dict:
 
 @app.get("/api/provider-models")
 async def provider_models(request: Request):
-    """Modelos de cada fornecedor (lista real) + dados reais já medidos de cada um (mesmo os que não estão escolhidos)."""
+    """Modelos de cada fornecedor (lista real), SEMPRE do mais forte ao mais fraco segundo dados online (não pelos teus benchmarks),
+    + os dados já medidos de cada um (mesmo os que não estão escolhidos) e quais estão a fazer benchmark agora."""
     await require_admin(request)
     force = bool(request.query_params.get("refresh"))
     summary = recompute_comparison().get("models_summary") or {}
     out = {}
+    active = set(CURRENT_JOB.get("models") or [])
     for prov in CONTESTANTS:
         lst = await list_provider_models(prov, force)
         tr = tracked_models()[prov]
         ids = sorted(set(lst["models"]) | set(tr) | {k.split("|", 1)[1] for k in summary if k.startswith(prov + "|")})
+        ranked = await ranked_models(ids, force)
         out[prov] = {"live": lst["live"], "error": lst["error"], "tracked": tr, "max_tracked": MAX_TRACKED_PER_PROVIDER,
-                     "models": [{"id": m, "tracked": m in tr, **(summary.get(mkey(prov, m)) or {})} for m in ids]}
+                     "ranking": ranking_meta(),
+                     "models": [{**r, "tracked": r["id"] in tr, "benchmarking": mkey(prov, r["id"]) in active,
+                                 **(summary.get(mkey(prov, r["id"])) or {})} for r in ranked]}
     return out
+
+
+@app.get("/api/model-rankings")
+async def model_rankings(request: Request):
+    """Classificação online usada para ordenar as listas (top 40). ?refresh=1 força nova leitura."""
+    await require_admin(request)
+    await fetch_online_ranking(bool(request.query_params.get("refresh")))
+    top = sorted(RANK_CACHE["models"], key=lambda m: -m["score"])[:40]
+    return {**ranking_meta(), "models": [{k: m[k] for k in ("slug", "name", "creator", "score")} for m in top]}
 
 
 @app.post("/api/models/track")
