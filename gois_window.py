@@ -61,7 +61,7 @@ SESSION_FILE = DATA_DIR / "multichats.json"
 LOCAL_SKILLS_FILE = DATA_DIR / "skills.json"          # skills criadas por ti
 KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"          # cópia local das lições da Sala de Aula
 
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
 STATE_BACKUP_FILE = DATA_DIR / "state_backup.json"      # cópia do estado do servidor (notas, tokens, limites) para repor após um reinício
 COMP_CACHE_FILE = DATA_DIR / "settings_cache.json"      # última leitura do servidor (mostra dados mesmo offline)
 HISTORY_FILE = DATA_DIR / "comparison_history.json"     # histórico dos totais para o gráfico de evolução
@@ -158,6 +158,24 @@ def mkey(provider, model):
     return f"{provider}|{model}"
 
 
+def fscore(v, nd=1, sign=False):
+    """Nota formatada sem esconder valores extremos: 0,04 não vira «0,0» e 0 continua a ser 0."""
+    if v is None:
+        return "—"
+    s = f"{v:+.{nd}f}" if sign else f"{v:.{nd}f}"
+    if v != 0 and float(s) == 0:
+        a = abs(v)
+        s = (f"{v:+.2g}" if sign else f"{v:.2g}") if a >= 0.001 else ("<0.001" if v > 0 else "-<0.001")
+    return s
+
+
+def scale_top(values, floor=100):
+    """Topo da escala dos gráficos: 100 por omissão; sobe em degraus de 25 se alguma nota passar de 100."""
+    nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    m = max(nums) if nums else 0
+    return floor if m <= floor else math.ceil(m / 25) * 25
+
+
 def short(txt, n=20):
     txt = str(txt)
     return txt if len(txt) <= n else txt[:n - 1] + "…"
@@ -193,7 +211,7 @@ def model_totals(cats, fair=True):
     for key, _n, field in COMPARE_MODELS:
         pool = [e for c, e in (cats or {}).items() if (c in common if common else True)]
         v = [x for x in (_score(e, field) for e in pool) if x is not None]
-        out[key] = (round(sum(v) / len(v), 1) if v else None, len(v))
+        out[key] = (round(sum(v) / len(v), 2) if v else None, len(v))
     return out
 
 
@@ -224,7 +242,7 @@ def head_to_head(cats, a, b):
             lose += 1
         else:
             tie += 1
-    return win, lose, tie, (round(sum(diffs) / len(diffs), 1) if diffs else None), len(diffs)
+    return win, lose, tie, (round(sum(diffs) / len(diffs), 2) if diffs else None), len(diffs)
 
 
 def focus_leads(e, focus):
@@ -628,6 +646,8 @@ class GoisWindow(tk.Tk):
         self._local_after = None
         self.local_log_lines = []
         self.local_status_state = ("⚪ Parado", "muted")
+        self.prompts_data = {}
+        self.prompt_widgets = {}
 
         self.setup_styles()
         self.build_ui()
@@ -833,12 +853,14 @@ class GoisWindow(tk.Tk):
         self.tab_skills = tk.Frame(self.notebook, bg=THEME["bg"])
         self.tab_sys = tk.Frame(self.notebook, bg=THEME["bg"])
         self.tab_local = tk.Frame(self.notebook, bg=THEME["bg"])
+        self.tab_prompts = tk.Frame(self.notebook, bg=THEME["bg"])
         self.notebook.add(self.tab_chat, text="💬 Chat & Histórico")
         self.notebook.add(self.tab_comp, text="📊 Comparação Live")
         self.notebook.add(self.tab_class, text="🏫 Sala de Aula")
         self.notebook.add(self.tab_skills, text="🧠 Skills")
         self.notebook.add(self.tab_sys, text="🛠 Sistema")
         self.notebook.add(self.tab_local, text="🤖 Modelo próprio")
+        self.notebook.add(self.tab_prompts, text="📜 Diretrizes")
 
         self.build_chat_tab()
         self.build_comparison_tab()
@@ -846,6 +868,7 @@ class GoisWindow(tk.Tk):
         self.build_skills_tab()
         self.build_system_tab()
         self.build_local_tab()
+        self.build_prompts_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
     def toggle_theme(self):
@@ -934,6 +957,7 @@ class GoisWindow(tk.Tk):
                     lost = res.get("skills", 0) < len(self.all_skills()) or res.get("lessons", 0) < len(self.kb_cache)
                     if lost or not was_connected:
                         self.sync_skills()
+                        self.sync_prompts()
                         self.refresh_classroom()
                         self.fetch_live()
                 delay = 240_000  # ping periódico: também impede o Render de adormecer enquanto a app está aberta
@@ -968,6 +992,8 @@ class GoisWindow(tk.Tk):
             self.after(50, self.draw_all_charts)
         if tab == 4:
             self.refresh_system_tab()
+        if tab == 6 and self.is_admin:
+            self.load_prompts()
         self.schedule_poll(tab == 2)
 
     def schedule_poll(self, on):
@@ -1837,7 +1863,7 @@ class GoisWindow(tk.Tk):
         rows = self.provider_rows(prov)
         for m, tr, avg, n, at in rows:
             if avg is not None:
-                txt = f"{m}    {avg:.1f} %  ·  {n} medições  ·  há {self.age_txt(at)}"
+                txt = f"{m}    {fscore(avg)} %  ·  {n} medições  ·  há {self.age_txt(at)}"
             elif tr:
                 txt = f"{m}    a medir — ainda sem notas (corre um benchmark)"
             else:
@@ -2022,11 +2048,11 @@ class GoisWindow(tk.Tk):
 
     @staticmethod
     def fnum(v, nd=1):
-        return "—" if v is None else f"{v:.{nd}f}"
+        return fscore(v, nd)
 
     @staticmethod
     def fdelta(a, b):
-        return "—" if a is None or b is None else f"{a - b:+.1f}"
+        return "—" if a is None or b is None else fscore(a - b, 1, True)
 
     def update_comparison_ui(self):
         if not hasattr(self, "comp_tree"):
@@ -2077,13 +2103,13 @@ class GoisWindow(tk.Tk):
         if avg is None:
             lines = [f"▶ {name}: ainda sem notas, corre um benchmark"]
         else:
-            lines = [f"▶ {name}:  total {avg:.1f} %  ·  #{pos} de {len(rows)}  ·  {n}/{len(DEFAULT_CATEGORIES)} categorias medidas"]
+            lines = [f"▶ {name}:  total {fscore(avg)} %  ·  #{pos} de {len(rows)}  ·  {n}/{len(DEFAULT_CATEGORIES)} categorias medidas"]
         for k, other, _f in self.MODELS:
             if k == focus:
                 continue
             win, lose, tie, delta, common = head_to_head(cats, focus, k)
             if common:
-                lines.append(f"      vs {other}: à frente em {win} · atrás em {lose} · empate em {tie} · Δ médio {delta:+.1f}  ({common} categorias em comum)")
+                lines.append(f"      vs {other}: à frente em {win} · atrás em {lose} · empate em {tie} · Δ médio {fscore(delta, 1, True)}  ({common} categorias em comum)")
             else:
                 lines.append(f"      vs {other}: ainda sem categorias em comum")
         lines.append("")
@@ -2101,7 +2127,7 @@ class GoisWindow(tk.Tk):
             others = sorted(((k.split("|", 1)[1], v) for k, v in summ.items() if k.startswith(prov + "|")
                              and k.split("|", 1)[1] != self.sel_models.get(prov)), key=lambda x: -x[1].get("avg", 0))
             if others:
-                lines.append(f"      {prov}, em medição por detrás: " + " · ".join(f"{m} {v['avg']:.1f}% ({v['n']})" for m, v in others))
+                lines.append(f"      {prov}, em medição por detrás: " + " · ".join(f"{m} {fscore(v['avg'])}% ({v['n']})" for m, v in others))
         try:
             lbl.config(text="\n".join(lines))
         except tk.TclError:
@@ -2149,6 +2175,7 @@ class GoisWindow(tk.Tk):
         top, row_h, bar_l = 30, 30, 214
         bar_r = max(bar_l + 40, w - 150)
         lead = rows[0][2]
+        hi = scale_top([r[2] for r in rows])
         for i, (key, name, val, n) in enumerate(rows):
             y0 = top + i * row_h
             yc = y0 + row_h / 2
@@ -2163,10 +2190,10 @@ class GoisWindow(tk.Tk):
             if val is None:
                 cv.create_text(bar_r + 8, yc, text="—", anchor="w", fill=THEME["muted"], font=("Segoe UI", 9))
                 continue
-            cv.create_rectangle(bar_l, yc - 5, bar_l + (bar_r - bar_l) * val / 100, yc + 5, fill=col, outline="")
-            cv.create_text(bar_r + 8, yc, text=f"{val:.1f} %", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
+            cv.create_rectangle(bar_l, yc - 5, bar_l + (bar_r - bar_l) * val / hi, yc + 5, fill=col, outline="")
+            cv.create_text(bar_r + 8, yc, text=f"{fscore(val)} %", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
             cv.create_text(w - 78, yc, text=f"{n}/{nc}", anchor="w", fill=THEME["muted"], font=("Segoe UI", 8))
-            cv.create_text(w - 12, yc, text="líder" if i == 0 else f"{val - lead:+.1f}", anchor="e",
+            cv.create_text(w - 12, yc, text="líder" if i == 0 else fscore(val - lead, 1, True), anchor="e",
                            fill=THEME["bot"] if i == 0 else THEME["muted"], font=("Segoe UI", 8))
         mc = measured_counts(self.cat_data())
         cc = len(common_categories(self.cat_data()))
@@ -2192,20 +2219,21 @@ class GoisWindow(tk.Tk):
                else "ainda sem benchmarks — corre um benchmark")
         cv.create_text(14, 30, text=sub, anchor="w", fill=THEME["muted"], font=("Segoe UI", 8))
         left, right, top, bottom = 38, w - 16, 48, h - 26
-        for v in (0, 25, 50, 75, 100):
-            y = bottom - (bottom - top) * v / 100
-            cv.create_line(left, y, right, y, fill=THEME["border"])
-            cv.create_text(left - 6, y, text=str(v), anchor="e", fill=THEME["muted"], font=("Segoe UI", 8))
         rows = self.ranking()
+        hi = scale_top([r[2] for r in rows])
+        for v in (hi * i / 4 for i in range(5)):
+            y = bottom - (bottom - top) * v / hi
+            cv.create_line(left, y, right, y, fill=THEME["border"])
+            cv.create_text(left - 6, y, text=f"{v:g}", anchor="e", fill=THEME["muted"], font=("Segoe UI", 8))
         slot = (right - left) / len(rows)
         bw = min(56, slot * 0.5)
         for i, (key, name, val, _n) in enumerate(rows):
             col = series_color(key) if key == focus else blend(series_color(key), THEME["panel"], 0.5)
             cx = left + slot * (i + 0.5)
             if val is not None:
-                y = bottom - (bottom - top) * val / 100
+                y = bottom - (bottom - top) * val / hi
                 cv.create_rectangle(cx - bw / 2, y, cx + bw / 2, bottom, fill=col, outline="")
-                cv.create_text(cx, y - 9, text=f"{val:.1f}%", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
+                cv.create_text(cx, y - 9, text=f"{fscore(val)}%", fill=THEME["fg"], font=("Segoe UI Semibold", 9))
             else:
                 cv.create_rectangle(cx - bw / 2, bottom - 2, cx + bw / 2, bottom, fill=THEME["border"], outline="")
                 cv.create_text(cx, bottom - 12, text="—", fill=THEME["muted"])
@@ -2228,9 +2256,9 @@ class GoisWindow(tk.Tk):
         if not vals:
             return
         lo = max(0, int(min(vals)) - 5)
-        hi = min(100, int(max(vals)) + 5)
+        hi = math.ceil(max(vals)) + 5
         if hi - lo < 10:
-            hi = min(100, lo + 10)
+            hi = lo + 10
             lo = max(0, hi - 10)
         left, right, top, bottom = 38, w - 16, 34, h - 26
         t0, t1 = pts[0]["t"], pts[-1]["t"]
@@ -2244,7 +2272,7 @@ class GoisWindow(tk.Tk):
 
         for v in (lo, (lo + hi) / 2, hi):
             cv.create_line(left, Y(v), right, Y(v), fill=THEME["border"])
-            cv.create_text(left - 6, Y(v), text=f"{v:.0f}", anchor="e", fill=THEME["muted"], font=("Segoe UI", 8))
+            cv.create_text(left - 6, Y(v), text=f"{v:g}", anchor="e", fill=THEME["muted"], font=("Segoe UI", 8))
         fmt = "%H:%M" if span < 86400 else "%d/%m"
         cv.create_text(left, bottom + 13, text=time.strftime(fmt, time.localtime(t0)), anchor="w", fill=THEME["muted"], font=("Segoe UI", 8))
         cv.create_text(right, bottom + 13, text=time.strftime(fmt, time.localtime(t1)), anchor="e", fill=THEME["muted"], font=("Segoe UI", 8))
@@ -2288,10 +2316,11 @@ class GoisWindow(tk.Tk):
         total_h = top + row_h * len(DEFAULT_CATEGORIES) + 8
         cv.config(scrollregion=(0, 0, w, total_h))
         cv.create_text(14, 16, text="Por categoria", anchor="w", fill=THEME["fg"], font=("Segoe UI Semibold", 10))
-        for v in (0, 25, 50, 75, 100):
-            x = left + (right - left) * v / 100
+        hi = scale_top([_score(e, f) for e in cats.values() for _k, _n, f in self.MODELS])
+        for v in (hi * i / 4 for i in range(5)):
+            x = left + (right - left) * v / hi
             cv.create_line(x, top - 8, x, total_h - 6, fill=THEME["border"])
-            cv.create_text(x, top - 16, text=str(v), fill=THEME["muted"], font=("Segoe UI", 8))
+            cv.create_text(x, top - 16, text=f"{v:g}", fill=THEME["muted"], font=("Segoe UI", 8))
         for i, c in enumerate(DEFAULT_CATEGORIES):
             y0 = top + i * row_h
             if c == self.sel_cat:
@@ -2305,10 +2334,10 @@ class GoisWindow(tk.Tk):
                 if v is None:
                     cv.create_line(left, by + 4, left + 6, by + 4, fill=THEME["border"], width=2)
                     continue
-                x = left + (right - left) * v / 100
+                x = left + (right - left) * v / hi
                 on = key == focus
                 cv.create_rectangle(left, by, x, by + 9, fill=series_color(key) if on else blend(series_color(key), THEME["panel"], 0.5), outline="")
-                cv.create_text(x + 5, by + 4, text=f"{v:.0f}", anchor="w", fill=THEME["fg"] if on else THEME["muted"],
+                cv.create_text(x + 5, by + 4, text=fscore(v, 0), anchor="w", fill=THEME["fg"] if on else THEME["muted"],
                                font=("Segoe UI Semibold" if on else "Segoe UI", 7))
 
     # ---- benchmarks ----
@@ -2443,7 +2472,7 @@ class GoisWindow(tk.Tk):
 
         def legacy_avg(fld):
             v = [x for x in (_score(e, fld) for e in cats.values()) if x is not None]
-            return round(sum(v) / len(v), 1) if v else None
+            return round(sum(v) / len(v), 2) if v else None
 
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             wr = csv.writer(f, delimiter=";")
@@ -2563,7 +2592,7 @@ class GoisWindow(tk.Tk):
             mc = measured_counts(self.cat_data())
             for k, _n, _f in self.MODELS:
                 v, n = tot[k]
-                self.kpi[k][0].config(text="—" if v is None else f"{v:.1f} %")
+                self.kpi[k][0].config(text="—" if v is None else f"{fscore(v)} %")
                 self.kpi[k][1].config(text=(f"#{pos[k]} · " if v is not None else "") + f"{mc[k]}/{nc} medidas · base {n}")
             self.reorder_model_cards()
             pbm = comp.get("parity_by_model") or {}
@@ -3316,6 +3345,243 @@ class GoisWindow(tk.Tk):
 
         self.bg(work, done)
 
+
+    # ======================================================================= #
+    # DIRETRIZES DO MODELO (admin / público)
+    # ======================================================================= #
+    PROMPT_ADMIN_SOFT = 1200   # acima disto o prompt do admin come espaço à conversa (contexto ~2048 tokens)
+
+    DIRECTIVE_HELP = (
+        "Todas as diretrizes valem já: o servidor injeta-as em CADA pedido, sem fine-tune. O fine-tune só serve para as tornar mais fiáveis "
+        "no teu 3B ou para as tirar do prompt (poupa contexto).\n"
+        "Regra prática: afina quando (1) o teste da diretriz falha em mais de 1 de cada 5 pedidos mesmo com ela no prompt; "
+        "(2) tens umas centenas de exemplos que mostram exatamente esse comportamento; (3) o problema é de formato, estilo ou identidade. "
+        "Factos que mudam vão para as lições (já são injetadas), não para o fine-tune.\n"
+        "Mede antes e depois com ⚔ Benchmark: o gois.v1 responde com a diretriz de admin, por isso mexer nela já mexe na nota.")
+
+    def build_prompts_tab(self):
+        t = self.tab_prompts
+        tk.Label(t, text="📜 Diretrizes do gois.v1", bg=THEME["bg"], fg=THEME["fg"],
+                 font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, padx=20, pady=(14, 2))
+        tk.Label(t, bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W, wraplength=1150,
+                 text="O servidor injeta a diretriz certa em CADA pedido de chat, por isso vale em qualquer chat novo. "
+                      "As mensagens «system» enviadas por clientes são ignoradas, logo ninguém as consegue sobrepor. "
+                      "Guardar aqui grava no servidor e vale logo no pedido seguinte; «Repor padrão» volta ao texto que está no código do app.py."
+                 ).pack(fill=tk.X, padx=20)
+        bar = tk.Frame(t, bg=THEME["bg"])
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=(0, 8))
+        self.btn(bar, "⟳ Recarregar do servidor", self.load_prompts).pack(side=tk.LEFT)
+        body = tk.Frame(t, bg=THEME["bg"])
+        body.pack(fill=tk.BOTH, expand=True)
+        left = tk.Frame(body, bg=THEME["bg"])
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right = tk.Frame(body, bg=THEME["bg"])
+        right.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
+        self.prompt_widgets = {}
+        specs = (("admin", "🔐 Admin (privado)", "Aplicada quando o pedido traz o teu X-Admin-Token válido. O chat de admin usa só o teu modelo (LM Studio)."),
+                 ("public", "🌐 Público (site)", "Aplicada a visitantes sem token. O chat público usa só os fornecedores (Groq, Gemini, OpenRouter, Mistral)."))
+        for key, title, hint in specs:
+            box = self.card(left)
+            box.pack(fill=tk.X, padx=(20, 10), pady=8)
+            bg = box.cget("bg")
+            head = tk.Frame(box, bg=bg)
+            head.pack(fill=tk.X, padx=12, pady=(10, 2))
+            tk.Label(head, text=title, bg=bg, fg=THEME["fg"], font=("Segoe UI Semibold", 10)).pack(side=tk.LEFT)
+            counter = tk.Label(head, text="", bg=bg, fg=THEME["muted"], font=("Segoe UI", 9))
+            counter.pack(side=tk.RIGHT)
+            tk.Label(box, text=hint, bg=bg, fg=THEME["muted"], font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT,
+                     wraplength=640).pack(fill=tk.X, padx=12)
+            txt = tk.Text(box, height=8, wrap=tk.WORD, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"],
+                          relief=tk.FLAT, padx=8, pady=6, font=("Segoe UI", 10), undo=True, width=60)
+            txt.pack(fill=tk.X, padx=12, pady=6)
+            txt.bind("<KeyRelease>", lambda _e, k=key: self.prompt_counter(k))
+            row = tk.Frame(box, bg=bg)
+            row.pack(fill=tk.X, padx=12, pady=(0, 10))
+            self.btn(row, "💾 Guardar no servidor", lambda k=key: self.save_prompt(k), THEME["accent"]).pack(side=tk.LEFT)
+            self.btn(row, "↺ Repor padrão", lambda k=key: self.reset_prompt(k)).pack(side=tk.LEFT, padx=8)
+            self.prompt_widgets[key] = (txt, counter)
+        self.build_directive_status(right)
+        self.prompts_ui_fill()
+
+    def build_directive_status(self, parent):
+        """Quadro «Estado de cada diretriz»: em vigor, fiabilidade no teu modelo e se o fine-tune ajuda. Só informação:
+        nada disto é enviado ao modelo."""
+        self._dir_rows = {}
+        card = self.card(parent)
+        card.pack(fill=tk.BOTH, expand=True, pady=8)
+        bg = card.cget("bg")
+        tk.Label(card, text="📊 Estado de cada diretriz (padrão do app.py)", bg=bg, fg=THEME["fg"],
+                 font=("Segoe UI Semibold", 10)).pack(anchor=tk.W, padx=12, pady=(10, 2))
+        self.dir_cost = tk.Label(card, text="", bg=bg, fg=THEME["muted"], font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W, wraplength=560)
+        self.dir_cost.pack(fill=tk.X, padx=12)
+        cols = ("id", "text", "force", "rel", "ft")
+        tv = ttk.Treeview(card, columns=cols, show="headings", height=13, selectmode="browse")
+        for c, w, h in (("id", 44, "#"), ("text", 230, "Diretriz"), ("force", 84, "Em vigor"), ("rel", 80, "Fiabilidade"), ("ft", 110, "Fine-tune")):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, anchor=tk.W, stretch=(c == "text"))
+        tv.pack(fill=tk.X, padx=12, pady=6)
+        tv.bind("<<TreeviewSelect>>", lambda _e: self.directive_detail())
+        self.dir_tree = tv
+        self.dir_detail = tk.Label(card, text="", bg=bg, fg=THEME["fg"], font=("Segoe UI", 9), justify=tk.LEFT, anchor="nw",
+                                   wraplength=560, height=7)
+        self.dir_detail.pack(fill=tk.X, padx=12)
+        tk.Label(card, text=self.DIRECTIVE_HELP, bg=bg, fg=THEME["muted"], font=("Segoe UI", 8), justify=tk.LEFT, anchor="nw",
+                 wraplength=560).pack(fill=tk.X, padx=12, pady=(6, 10))
+
+    def directives_ui_fill(self):
+        tv = getattr(self, "dir_tree", None)
+        if tv is None:
+            return
+        data = self.prompts_data or {}
+        try:
+            tv.delete(*tv.get_children())
+            self._dir_rows = {}
+            for key, icon in (("admin", "🔐"), ("public", "🌐")):
+                for d in data.get(key + "_directives") or []:
+                    iid = f"{key}{d.get('n')}"
+                    self._dir_rows[iid] = d
+                    text = str(d.get("text") or "")
+                    tv.insert("", tk.END, iid=iid, values=(f"{icon}{d.get('n')}", text if len(text) <= 44 else text[:43] + "…",
+                                                           d.get("in_force", ""), d.get("reliability", ""), d.get("finetune", "")))
+            if not self._dir_rows:
+                self.dir_cost.config(text="Liga-te ao servidor como admin e carrega em ⟳ Recarregar. Se continuar vazio, "
+                                          "atualiza o servidor para a versão 6.3.1.")
+            else:
+                cost = data.get("cost") or {}
+                msg = (f"🔐 = Admin (o teu modelo) · 🌐 = Público (fornecedores). O prompt de admin em vigor ocupa "
+                       f"≈ {cost.get('admin_tokens_est', '?')} tokens ({cost.get('admin_pct_ctx', '?')} % do contexto de {cost.get('ctx', '?')}).")
+                if data.get("admin_custom") or data.get("public_custom"):
+                    msg += " ⚠ Tens texto editado: este quadro descreve as diretrizes PADRÃO, não o que escreveste."
+                self.dir_cost.config(text=msg)
+            self.directive_detail()
+        except tk.TclError:
+            pass
+
+    def directive_detail(self):
+        try:
+            sel = self.dir_tree.selection()
+            d = self._dir_rows.get(sel[0]) if sel else None
+            self.dir_detail.config(text=(f"«{d['text']}»\n\nPorquê: {d['note']}\n\nComo testar: {d['test']}" if d
+                                         else "Seleciona uma diretriz para ver o porquê e como testá-la."))
+        except (tk.TclError, KeyError, AttributeError):
+            pass
+
+    def prompt_text(self, key):
+        txt, _ = self.prompt_widgets[key]
+        return txt.get("1.0", "end-1c").strip()
+
+    def prompt_counter(self, key):
+        try:
+            _, lbl = self.prompt_widgets[key]
+            n = len(self.prompt_text(key))
+            mx = int(self.prompts_data.get("max_chars", 3000))
+            if n > mx:
+                lbl.config(text=f"{n} caracteres — acima do máximo ({mx})", fg=THEME["danger"])
+            elif key == "admin" and n > self.PROMPT_ADMIN_SOFT:
+                lbl.config(text=f"{n} caracteres — longo: tira espaço à conversa e às lições", fg=THEME["warn"])
+            else:
+                lbl.config(text=f"{n} caracteres", fg=THEME["muted"])
+        except (tk.TclError, KeyError):
+            pass
+
+    def prompts_ui_fill(self):
+        local = self.cfg.get("prompts_local") or {}
+        for key, (txt, _lbl) in self.prompt_widgets.items():
+            text = self.prompts_data.get(key) or local.get(key) or ""
+            try:
+                txt.delete("1.0", tk.END)
+                txt.insert("1.0", text if text else "(liga-te ao servidor como admin para ver a diretriz em vigor)")
+            except tk.TclError:
+                continue
+            self.prompt_counter(key)
+        self.directives_ui_fill()
+
+    def load_prompts(self):
+        if not self.is_admin:
+            return
+
+        def done(res, err):
+            if err or not isinstance(res, dict):
+                return
+            self.prompts_data = res
+            self.prompts_ui_fill()
+
+        self.bg(lambda: self.api.call("GET", "/api/prompts", timeout=40), done)
+
+    def sync_prompts(self):
+        """O Render tem disco efémero: se perdeu as diretrizes editadas, repõe-nas a partir da cópia deste PC."""
+        if not self.is_admin:
+            return
+        local = dict(self.cfg.get("prompts_local") or {})
+
+        def work():
+            res = self.api.call("GET", "/api/prompts", timeout=40)
+            push = {k: local[k] for k in ("admin", "public") if local.get(k) and not res.get(k + "_custom")}
+            if push:
+                res = self.api.call("POST", "/api/prompts", push, timeout=40)
+            return res, bool(push)
+
+        def done(r, err):
+            if err or not r:
+                return
+            res, pushed = r
+            self.prompts_data = res
+            loc, changed = dict(self.cfg.get("prompts_local") or {}), False
+            for k in ("admin", "public"):
+                want = res.get(k) if res.get(k + "_custom") else ""
+                if loc.get(k, "") != want:
+                    loc[k], changed = want, True
+            if changed:
+                self.cfg["prompts_local"] = loc
+                self.save_config()
+            self.prompts_ui_fill()
+            if pushed:
+                self.flash("📜 Diretrizes repostas no servidor (o Render tinha-as perdido).", THEME["warn"], ms=8000)
+
+        self.bg(work, done)
+
+    def push_prompt(self, key, send, ok_msg):
+        def done(res, err):
+            if err:
+                messagebox.showerror("Diretrizes", f"Não consegui guardar no servidor:\n{err}", parent=self)
+                return
+            self.prompts_data = res
+            loc = dict(self.cfg.get("prompts_local") or {})
+            loc[key] = send
+            self.cfg["prompts_local"] = loc
+            self.save_config()
+            self.prompts_ui_fill()
+            self.flash(ok_msg, THEME["bot"], ms=8000)
+
+        self.bg(lambda: self.api.call("POST", "/api/prompts", {key: send}, timeout=40), done)
+
+    def save_prompt(self, key):
+        if not self.require_admin_ui():
+            return
+        text = self.prompt_text(key)
+        if text.startswith("(liga-te ao servidor"):
+            messagebox.showinfo("Diretrizes", "Ainda não carreguei a diretriz do servidor. Carrega em ⟳ Recarregar e tenta de novo.", parent=self)
+            return
+        mx = int(self.prompts_data.get("max_chars", 3000))
+        if len(text) > mx:
+            messagebox.showwarning("Diretrizes", f"Máximo {mx} caracteres (tem {len(text)}).", parent=self)
+            return
+        if key == "admin" and len(text) > self.PROMPT_ADMIN_SOFT and not messagebox.askyesno(
+                "Diretriz longa",
+                f"Esta diretriz tem {len(text)} caracteres. O teu modelo tem um contexto pequeno (cerca de 2048 tokens): "
+                "quanto maior o prompt, menos sobra para a conversa e para as lições da Sala de Aula.\n\nGuardar mesmo assim?", parent=self):
+            return
+        default = str(self.prompts_data.get(key + "_default") or "").strip()
+        send = "" if (not text or text == default) else text      # igual ao padrão = sem personalização
+        nome = "admin" if key == "admin" else "pública"
+        self.push_prompt(key, send, f"💾 Diretriz {nome} guardada — vale já no próximo pedido.")
+
+    def reset_prompt(self, key):
+        if not self.require_admin_ui():
+            return
+        nome = "admin" if key == "admin" else "pública"
+        if messagebox.askyesno("Repor padrão", f"Repor a diretriz {nome} para o texto padrão do app.py?", parent=self):
+            self.push_prompt(key, "", f"↺ Diretriz {nome} reposta para o padrão.")
 
     # ======================================================================= #
     # MODELO PRÓPRIO (LM Studio + túnel Cloudflare + servidor)
