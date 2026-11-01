@@ -61,7 +61,7 @@ SESSION_FILE = DATA_DIR / "multichats.json"
 LOCAL_SKILLS_FILE = DATA_DIR / "skills.json"          # skills criadas por ti
 KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"          # cópia local das lições da Sala de Aula
 
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"
 STATE_BACKUP_FILE = DATA_DIR / "state_backup.json"      # cópia do estado do servidor (notas, tokens, limites) para repor após um reinício
 COMP_CACHE_FILE = DATA_DIR / "settings_cache.json"      # última leitura do servidor (mostra dados mesmo offline)
 HISTORY_FILE = DATA_DIR / "comparison_history.json"     # histórico dos totais para o gráfico de evolução
@@ -771,6 +771,39 @@ class GoisWindow(tk.Tk):
     def card(self, parent, **kw):
         return tk.Frame(parent, bg=THEME["panel"], highlightbackground=THEME["border"], highlightthickness=1, **kw)
 
+    def make_scroll_area(self, parent, bg=None):
+        """Zona com scroll vertical (roda do rato incluída). Devolve (contentor a empacotar, frame interior onde se põem as linhas)."""
+        bg = bg or THEME["panel"]
+        wrap = tk.Frame(parent, bg=bg)
+        cv = tk.Canvas(wrap, bg=bg, highlightthickness=0)
+        vs = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=cv.yview)
+        cv.configure(yscrollcommand=vs.set)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = tk.Frame(cv, bg=bg)
+        win_id = cv.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.bind("<Configure>", lambda e: cv.itemconfigure(win_id, width=e.width))
+
+        def wheel(e):
+            if inner.winfo_height() > cv.winfo_height():
+                cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+
+        def enter(_e):
+            cv.bind_all("<MouseWheel>", wheel)
+
+        def leave(e):
+            try:
+                under = wrap.winfo_containing(e.x_root, e.y_root)
+            except (tk.TclError, KeyError):
+                under = None
+            if under is None or not str(under).startswith(str(wrap)):      # só larga a roda quando o rato saiu mesmo da zona
+                cv.unbind_all("<MouseWheel>")
+
+        wrap.bind("<Enter>", enter)
+        wrap.bind("<Leave>", leave)
+        return wrap, inner
+
     def kpi_card(self, parent, key, title, color=None, big=False, status=False):
         f = self.card(parent)
         f.pack(side=tk.LEFT, padx=(0, 8), fill=tk.Y)
@@ -1010,17 +1043,35 @@ class GoisWindow(tk.Tk):
                 self.refresh_classroom()
             self.schedule_poll(True)
 
+    ENV_CRITICAL = ("ADMIN_TOKEN", "RENDER_API_KEY", "RENDER_SERVICE_ID")      # mexer nestas pode tirar-te o acesso
+    ENV_NAME_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+    ENV_SOURCE_TXT = {"render": "☁ Render", "ambiente": "⚙ ambiente (só leitura)", "memória": "🧠 só em memória"}
+
     def open_settings(self):
         win = tk.Toplevel(self)
         win.title("Definições")
         win.configure(bg=THEME["panel"])
-        win.geometry("560x620")
+        win.geometry("820x700")
+        win.minsize(700, 560)
         win.transient(self)
         win.grab_set()
+        panel = THEME["panel"]
 
+        # mensagem de estado partilhada pelos dois separadores (fica no fundo da janela)
+        info = tk.Label(win, text="", bg=panel, fg=THEME["muted"], justify=tk.LEFT, anchor="w", wraplength=780, font=("Segoe UI", 9))
+        info.pack(side=tk.BOTTOM, fill=tk.X, padx=18, pady=(0, 10))
+
+        nb = ttk.Notebook(win)
+        nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 6))
+        tab_conn = tk.Frame(nb, bg=panel)
+        tab_env = tk.Frame(nb, bg=panel)
+        nb.add(tab_conn, text="🔌 Ligação")
+        nb.add(tab_env, text="🔑 Environment")
+
+        # ----------------------------------------------------------------- separador Ligação
         def row(label, value="", show=None):
-            tk.Label(win, text=label, bg=THEME["panel"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=18, pady=(12, 2))
-            e = tk.Entry(win, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT, show=show)
+            tk.Label(tab_conn, text=label, bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=18, pady=(12, 2))
+            e = tk.Entry(tab_conn, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"], relief=tk.FLAT, show=show)
             e.insert(0, value)
             e.pack(fill=tk.X, padx=18, ipady=5)
             return e
@@ -1039,56 +1090,15 @@ class GoisWindow(tk.Tk):
             self.check_connection()
             win.destroy()
 
-        self.btn(win, "Guardar e reconectar", save, THEME["accent"]).pack(anchor=tk.W, padx=18, pady=12)
-
-        tk.Frame(win, bg=THEME["border"], height=1).pack(fill=tk.X, padx=18, pady=6)
-        tk.Label(win, text="Chave API para o servidor", bg=THEME["panel"], fg=THEME["fg"], font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=18)
-        frm = tk.Frame(win, bg=THEME["panel"])
-        frm.pack(fill=tk.X, padx=18, pady=6)
-        prov = ttk.Combobox(frm, values=["Groq", "Gemini", "OpenRouter", "Mistral"], state="readonly", width=12)
-        prov.set("Groq")
-        prov.pack(side=tk.LEFT)
-        e_key = tk.Entry(frm, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground="white", relief=tk.FLAT, show="•")
-        e_key.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, ipady=5)
-        info = tk.Label(win, text="", bg=THEME["panel"], fg=THEME["muted"], justify=tk.LEFT, wraplength=520, font=("Segoe UI", 9))
-        info.pack(anchor=tk.W, padx=18)
-
-        def send_key():
-            k = e_key.get().strip()
-            if not k:
-                return
-
-            def done(res, err):
-                info.config(text=f"❌ {err}" if err else key_result(res, "Enviada"))
-                if not err:
-                    e_key.delete(0, tk.END)
-
-            self.bg(lambda: self.api.call("POST", "/api/keys", {"provider": prov.get(), "key": k}, timeout=45), done)
-
-        def key_result(res, verb):
-            """Diz a verdade sobre onde ficou: Render (permanente) ou só memória do servidor."""
-            if res.get("persisted"):
-                return f"✅ {verb} e gravada no Render > Environment ({res.get('render', '')})."
-            return f"✅ {verb}, mas só em memória no servidor: {res.get('render', 'sem detalhe')}."
-
-        def remove_key():
-            if not messagebox.askyesno("Remover chave", f"Remover a chave {prov.get()} do servidor e do Render > Environment?", parent=win):
-                return
-
-            def done(res, err):
-                info.config(text=f"❌ {err}" if err else key_result(res, "Removida"))
-
-            self.bg(lambda: self.api.call("DELETE", f"/api/keys/{prov.get()}", timeout=45), done)
-
-        self.btn(frm, "Enviar", send_key, THEME["accent_blue"]).pack(side=tk.LEFT)
-        self.btn(frm, "🗑 Remover", remove_key).pack(side=tk.LEFT, padx=(6, 0))
+        self.btn(tab_conn, "Guardar e reconectar", save, THEME["accent"]).pack(anchor=tk.W, padx=18, pady=12)
 
         def show_status():
             def done(res, err):
                 if err:
-                    info.config(text=f"❌ {err}")
+                    info.config(text=f"❌ {err}", fg=THEME["danger"])
                 else:
-                    info.config(text="Chaves: " + " · ".join(f"{n}: {'✅' if v.get('configured') else '—'}" for n, v in res.items()))
+                    info.config(text="Chaves: " + " · ".join(f"{n}: {'✅' if v.get('configured') else '—'}" for n, v in res.items()),
+                                fg=THEME["fg"])
 
             self.bg(lambda: self.api.call("GET", "/api/keys/status"), done)
 
@@ -1106,10 +1116,237 @@ class GoisWindow(tk.Tk):
 
             self.bg(work, lambda r, e: info.config(text=f"❌ {e}" if e else r, fg=THEME["danger"] if e else THEME["fg"]))
 
-        rowb = tk.Frame(win, bg=THEME["panel"])
+        rowb = tk.Frame(tab_conn, bg=panel)
         rowb.pack(anchor=tk.W, padx=18, pady=6)
         self.btn(rowb, "Ver estado das chaves", show_status).pack(side=tk.LEFT)
         self.btn(rowb, "🔌 Testar ligação", diagnose, THEME["accent_blue"]).pack(side=tk.LEFT, padx=6)
+
+        # ----------------------------------------------------------------- separador Environment
+        env_state = {"vars": [], "render_sync": False, "detail": "", "suggestions": [], "loaded": False}
+
+        head = tk.Frame(tab_env, bg=panel)
+        head.pack(fill=tk.X, padx=12, pady=(12, 0))
+        tk.Label(head, text="Variáveis do servidor (Render > Environment)", bg=panel, fg=THEME["fg"],
+                 font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        env_note = tk.Label(tab_env, text="", bg=panel, fg=THEME["muted"], justify=tk.LEFT, anchor="w", wraplength=780, font=("Segoe UI", 9))
+        env_note.pack(fill=tk.X, padx=12, pady=(4, 4))
+        wrap, inner = self.make_scroll_area(tab_env, panel)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def crit_text(name, verb):
+            extra = {"ADMIN_TOKEN": "Se mudares o ADMIN_TOKEN, o token guardado neste PC deixa de servir quando o Render reiniciar "
+                                    "(terás de o atualizar no separador 🔌 Ligação).",
+                     "RENDER_API_KEY": "Sem uma RENDER_API_KEY válida o servidor deixa de conseguir mexer no Environment.",
+                     "RENDER_SERVICE_ID": "Sem o RENDER_SERVICE_ID certo o servidor deixa de encontrar o serviço no Render."}.get(name, "")
+            return f"{name} é uma variável crítica.\n\n{extra}\n\nQueres mesmo {verb}?"
+
+        def env_result(res, verb):
+            key = res.get("key") or res.get("provider") or ""
+            if res.get("persisted"):
+                return (f"✅ {key} {verb} no Render > Environment ({res.get('render', '')}). "
+                        "O Render pode reiniciar o serviço para aplicar a alteração.")
+            return f"✅ {key} {verb}, mas só em memória no servidor: {res.get('render', 'sem detalhe')}."
+
+        def draw_env():
+            try:
+                for w in inner.winfo_children():
+                    w.destroy()
+                vars_ = env_state.get("vars") or []
+                if env_state.get("render_sync"):
+                    env_note.config(text=f"✅ {len(vars_)} variáveis · ligado à API do Render: o que mudares aqui grava no Render > Environment "
+                                         "e o Render pode reiniciar o serviço para o aplicar.", fg=THEME["muted"])
+                else:
+                    env_note.config(text="⚠ " + (env_state.get("detail") or "sem ligação ao Render"), fg=THEME["warn"])
+                if not vars_:
+                    tk.Label(inner, text="(sem variáveis para mostrar)", bg=panel, fg=THEME["muted"]).pack(anchor=tk.W, padx=8, pady=8)
+                for v in vars_:
+                    alt = THEME["panel_alt"]
+                    r = tk.Frame(inner, bg=alt, highlightthickness=1, highlightbackground=THEME["border"])
+                    r.pack(fill=tk.X, pady=3, padx=2)
+                    top = tk.Frame(r, bg=alt)
+                    top.pack(fill=tk.X, padx=8, pady=(6, 0))
+                    btns = tk.Frame(top, bg=alt)
+                    btns.pack(side=tk.RIGHT)
+                    ed = self.btn(btns, "✏ Editar", lambda v=v: env_dialog(v), padx=8, pady=2)
+                    rm = self.btn(btns, "🗑 Remover", lambda v=v: env_remove(v), padx=8, pady=2)
+                    ed.pack(side=tk.LEFT)
+                    rm.pack(side=tk.LEFT, padx=(4, 0))
+                    if not v.get("editable"):
+                        ed.config(state=tk.DISABLED)
+                        rm.config(state=tk.DISABLED)
+                    tk.Label(top, text=v["key"], bg=alt, fg=THEME["fg"], font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+                    tags = []
+                    if v.get("provider"):
+                        tags.append(f"chave {v['provider']}")
+                    if v.get("protected"):
+                        tags.append("🔒 crítica")
+                    tags.append(self.ENV_SOURCE_TXT.get(v.get("source"), str(v.get("source") or "")))
+                    tk.Label(top, text="  ·  ".join(tags), bg=alt, fg=THEME["muted"], font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=10)
+                    tk.Label(r, text=v.get("preview") or "", bg=alt, fg=THEME["muted"], font=("Consolas", 9),
+                             anchor="w", justify=tk.LEFT).pack(fill=tk.X, padx=8, pady=(2, 6))
+            except tk.TclError:
+                pass
+
+        def load_env():
+            if not self.is_admin:
+                for w in inner.winfo_children():
+                    w.destroy()
+                env_note.config(text="Precisas de um token de administrador válido (separador 🔌 Ligação) para ver e editar o environment.",
+                                fg=THEME["warn"])
+                return
+            env_note.config(text="⏳ a ler as variáveis do servidor…", fg=THEME["muted"])
+
+            def done(res, err):
+                try:
+                    if not win.winfo_exists():
+                        return
+                    if err:
+                        msg = str(err)
+                        if "404" in msg or "405" in msg:
+                            msg = "o servidor ainda não tem /api/env: atualiza o app.py para a versão 6.4.0."
+                        env_note.config(text=f"❌ {msg}", fg=THEME["danger"])
+                        return
+                    env_state.update(res, loaded=True)
+                    draw_env()
+                except tk.TclError:
+                    pass
+
+            self.bg(lambda: self.api.call("GET", "/api/env", timeout=60), done)
+
+        def after_change(res, verb):
+            try:
+                if not win.winfo_exists():
+                    return
+                info.config(text=env_result(res, verb), fg=THEME["fg"])
+                try:
+                    win.grab_set()           # o diálogo filho tinha a seleção; devolve-a a esta janela
+                except tk.TclError:
+                    pass
+                load_env()
+            except tk.TclError:
+                pass
+
+        def env_dialog(v=None):
+            editing = v is not None
+            d = tk.Toplevel(win)
+            d.title("Editar environment" if editing else "Adicionar novo environment")
+            d.configure(bg=panel)
+            d.geometry("580x340")
+            d.transient(win)
+            d.grab_set()
+            bar = tk.Frame(d, bg=panel)
+            bar.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=14)
+            btn_save = self.btn(bar, "💾 Guardar", lambda: do_save(), THEME["accent"])
+            btn_save.pack(side=tk.LEFT)
+            self.btn(bar, "Cancelar", d.destroy).pack(side=tk.LEFT, padx=8)
+            tk.Label(d, text="Nome da variável", bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=16, pady=(14, 2))
+            if editing:
+                e_name = tk.Entry(d, bg=THEME["code_bg"], fg=THEME["fg"], readonlybackground=THEME["code_bg"], relief=tk.FLAT,
+                                  font=("Consolas", 10))
+                e_name.insert(0, v["key"])
+                e_name.config(state="readonly")
+                e_name.pack(fill=tk.X, padx=16, ipady=5)
+            else:
+                e_name = ttk.Combobox(d, values=list(env_state.get("suggestions") or []), font=("Consolas", 10))
+                e_name.pack(fill=tk.X, padx=16, ipady=3)
+                e_name.focus_set()
+            tk.Label(d, text="Valor", bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=16, pady=(12, 2))
+            e_val = tk.Entry(d, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"], relief=tk.FLAT, show="•",
+                             font=("Consolas", 10))
+            e_val.pack(fill=tk.X, padx=16, ipady=5)
+            show_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(d, text="Mostrar valor", variable=show_var, bg=panel, fg=THEME["muted"], selectcolor=THEME["code_bg"],
+                           activebackground=panel, activeforeground=THEME["fg"], highlightthickness=0,
+                           command=lambda: e_val.config(show="" if show_var.get() else "•")).pack(anchor=tk.W, padx=12, pady=(4, 0))
+            msg = tk.Label(d, text="", bg=panel, fg=THEME["muted"], justify=tk.LEFT, anchor="w", wraplength=540, font=("Segoe UI", 9))
+            msg.pack(fill=tk.X, padx=16, pady=(6, 0))
+            if editing:
+                msg.config(text="⏳ a carregar o valor atual…")
+
+                def got(res, err):
+                    try:
+                        if err:
+                            msg.config(text=f"⚠ Não consegui ler o valor atual ({err}). Escreve o novo valor.", fg=THEME["warn"])
+                        else:
+                            if not e_val.get():
+                                e_val.insert(0, res.get("value", ""))
+                            msg.config(text="Altera o valor e guarda.", fg=THEME["muted"])
+                    except tk.TclError:
+                        pass
+
+                self.bg(lambda: self.api.call("GET", f"/api/env/{v['key']}", timeout=60), got)
+            else:
+                msg.config(text="Escolhe um nome da lista ou escreve o teu. Depois de guardar o Render pode reiniciar o serviço.")
+
+            def do_save():
+                name, value = e_name.get().strip(), e_val.get().strip()
+                if not self.ENV_NAME_OK.match(name):
+                    messagebox.showwarning("Environment", "Nome inválido: só letras, números e _ (não pode começar por número).", parent=d)
+                    return
+                if not value:
+                    messagebox.showwarning("Environment", "O valor está vazio. Para apagar a variável usa 🗑 Remover.", parent=d)
+                    return
+                exists = any(x["key"] == name for x in env_state.get("vars") or [])
+                if not editing and exists and not messagebox.askyesno("Environment", f"{name} já existe. Substituir o valor?", parent=d):
+                    return
+                critical = name in self.ENV_CRITICAL
+                if critical and not messagebox.askyesno("Variável crítica", crit_text(name, "alterá-la"), icon="warning", parent=d):
+                    return
+                btn_save.config(state=tk.DISABLED)
+                msg.config(text="⏳ a gravar…", fg=THEME["muted"])
+
+                def done(res, err):
+                    try:
+                        if err:
+                            btn_save.config(state=tk.NORMAL)
+                            msg.config(text=f"❌ {err}", fg=THEME["danger"])
+                            return
+                        d.destroy()
+                    except tk.TclError:
+                        pass
+                    after_change(res, "gravada")
+
+                self.bg(lambda: self.api.call("PUT", f"/api/env/{name}", {"value": value, "force": critical}, timeout=60), done)
+
+            d.bind("<Return>", lambda _e: do_save())
+            d.bind("<Escape>", lambda _e: d.destroy())
+
+        def env_remove(v):
+            name = v["key"]
+            critical = name in self.ENV_CRITICAL
+            text = crit_text(name, "removê-la") if critical else f"Remover {name} do servidor e do Render > Environment?"
+            if not messagebox.askyesno("Remover environment", text, icon="warning" if critical else "question", parent=win):
+                return
+            info.config(text="⏳ a remover…", fg=THEME["muted"])
+
+            def done(res, err):
+                try:
+                    if not win.winfo_exists():
+                        return
+                    if err:
+                        info.config(text=f"❌ {err}", fg=THEME["danger"])
+                        return
+                except tk.TclError:
+                    return
+                after_change(res, "removida")
+
+            path = f"/api/env/{name}" + ("?force=1" if critical else "")
+            self.bg(lambda: self.api.call("DELETE", path, timeout=60), done)
+
+        def add_env():
+            if not self.is_admin:
+                messagebox.showwarning("Environment", "Precisas de um token de administrador válido (separador 🔌 Ligação).", parent=win)
+                return
+            env_dialog(None)
+
+        self.btn(head, "➕ Adicionar novo environment", add_env, THEME["accent"]).pack(side=tk.RIGHT)
+        self.btn(head, "⟳", load_env, padx=9).pack(side=tk.RIGHT, padx=(0, 6))
+
+        def on_tab(_e=None):
+            if nb.select() == str(tab_env) and not env_state["loaded"]:
+                load_env()
+
+        nb.bind("<<NotebookTabChanged>>", on_tab)
 
     # ======================================================================= #
     # CHAT
@@ -3375,112 +3612,376 @@ class GoisWindow(tk.Tk):
         "Factos que mudam vão para as lições (já são injetadas), não para o fine-tune.\n"
         "Mede antes e depois com ⚔ Benchmark: o gois.v1 responde com a diretriz de admin, por isso mexer nela já mexe na nota.")
 
+    RELIABILITY_OPTS = (("alta", "Alta"), ("media", "Média"), ("baixa", "Baixa"))
+    FINETUNE_OPTS = (("nao", "Não precisa"), ("ajuda", "Ajuda"), ("nao_resolve", "Não resolve"), ("na", "N/A (terceiros)"))
+
     def build_prompts_tab(self):
         t = self.tab_prompts
+        self._dir_sel = None
+        self._dir_rows = {}
+        self._dir_frames = {}
+        self._adv_open = False
         tk.Label(t, text="📜 Diretrizes do gois.v1", bg=THEME["bg"], fg=THEME["fg"],
                  font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, padx=20, pady=(14, 2))
         tk.Label(t, bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W, wraplength=1150,
-                 text="O servidor injeta a diretriz certa em CADA pedido de chat, por isso vale em qualquer chat novo. "
-                      "As mensagens «system» enviadas por clientes são ignoradas, logo ninguém as consegue sobrepor. "
-                      "Guardar aqui grava no servidor e vale logo no pedido seguinte; «Repor padrão» volta ao texto que está no código do app.py."
+                 text="O servidor injeta as diretrizes certas em CADA pedido de chat (as mensagens «system» enviadas por clientes são ignoradas). "
+                      "Cada diretriz tem os seus botões: ✏ Editar, 🗑 Remover e, se a editaste, ↺ Repor (volta ao texto do app.py). "
+                      "➕ Adicionar cria uma nova. Tudo grava no servidor e vale logo no pedido seguinte."
                  ).pack(fill=tk.X, padx=20)
+        self.dir_cost = tk.Label(t, text="", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W,
+                                 wraplength=1150)
+        self.dir_cost.pack(fill=tk.X, padx=20, pady=(4, 0))
+
+        # --- parte de baixo (empacotada primeiro para reservar o espaço): barra, texto livre (escondido) e detalhe
         bar = tk.Frame(t, bg=THEME["bg"])
         bar.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=(0, 8))
         self.btn(bar, "⟳ Recarregar do servidor", self.load_prompts).pack(side=tk.LEFT)
-        body = tk.Frame(t, bg=THEME["bg"])
-        body.pack(fill=tk.BOTH, expand=True)
-        left = tk.Frame(body, bg=THEME["bg"])
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        right = tk.Frame(body, bg=THEME["bg"])
-        right.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
+        self.adv_btn = self.btn(bar, "▸ Avançado: texto livre", self.toggle_free_text)
+        self.adv_btn.pack(side=tk.LEFT, padx=8)
+
+        det = self.card(t)
+        det.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=(6, 8))
+        self.dir_detail_box = det
+        self.dir_detail = tk.Text(det, height=6, wrap=tk.WORD, bg=det.cget("bg"), fg=THEME["fg"], relief=tk.FLAT, bd=0, highlightthickness=0,
+                                  font=("Segoe UI", 9), padx=10, pady=8, state=tk.DISABLED)
+        self.dir_detail.pack(fill=tk.X)
+
+        specs = (("admin", "🔐 Admin (privado)", "Aplicadas quando o pedido traz o teu X-Admin-Token. O chat de admin usa só o teu modelo (LM Studio)."),
+                 ("public", "🌐 Público (site)", "Aplicadas a visitantes sem token. O chat público usa só os fornecedores (Groq, Gemini, OpenRouter, Mistral)."))
+
+        # texto livre (modo antigo): escondido por defeito; se for usado, SUBSTITUI a lista
+        self.adv_frame = tk.Frame(t, bg=THEME["bg"])
         self.prompt_widgets = {}
-        specs = (("admin", "🔐 Admin (privado)", "Aplicada quando o pedido traz o teu X-Admin-Token válido. O chat de admin usa só o teu modelo (LM Studio)."),
-                 ("public", "🌐 Público (site)", "Aplicada a visitantes sem token. O chat público usa só os fornecedores (Groq, Gemini, OpenRouter, Mistral)."))
-        for key, title, hint in specs:
-            box = self.card(left)
-            box.pack(fill=tk.X, padx=(20, 10), pady=8)
+        for key, title, _hint in specs:
+            box = self.card(self.adv_frame)
+            box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=4)
             bg = box.cget("bg")
-            head = tk.Frame(box, bg=bg)
-            head.pack(fill=tk.X, padx=12, pady=(10, 2))
+            h = tk.Frame(box, bg=bg)
+            h.pack(fill=tk.X, padx=12, pady=(8, 2))
+            tk.Label(h, text="Texto livre — " + title, bg=bg, fg=THEME["fg"], font=("Segoe UI Semibold", 9)).pack(side=tk.LEFT)
+            counter = tk.Label(h, text="", bg=bg, fg=THEME["muted"], font=("Segoe UI", 9))
+            counter.pack(side=tk.RIGHT)
+            tk.Label(box, text="Se guardares texto aqui, ele SUBSTITUI a lista de diretrizes deste âmbito.", bg=bg, fg=THEME["muted"],
+                     font=("Segoe UI", 8), anchor=tk.W).pack(fill=tk.X, padx=12)
+            txt = tk.Text(box, height=5, wrap=tk.WORD, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"],
+                          relief=tk.FLAT, padx=8, pady=6, font=("Segoe UI", 10), undo=True, width=40)
+            txt.pack(fill=tk.X, padx=12, pady=4)
+            txt.bind("<KeyRelease>", lambda _e, k=key: self.prompt_counter(k))
+            row = tk.Frame(box, bg=bg)
+            row.pack(fill=tk.X, padx=12, pady=(0, 8))
+            self.btn(row, "💾 Guardar texto livre", lambda k=key: self.save_prompt(k), THEME["accent"]).pack(side=tk.LEFT)
+            self.btn(row, "↺ Desativar texto livre", lambda k=key: self.reset_prompt(k)).pack(side=tk.LEFT, padx=8)
+            self.prompt_widgets[key] = (txt, counter)
+
+        # --- as duas listas de diretrizes
+        body = tk.Frame(t, bg=THEME["bg"])
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(6, 0))
+        self.dir_cols = {}
+        for key, title, hint in specs:
+            col = self.card(body)
+            col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=4)
+            bg = col.cget("bg")
+            head = tk.Frame(col, bg=bg)
+            head.pack(fill=tk.X, padx=12, pady=(10, 0))
             tk.Label(head, text=title, bg=bg, fg=THEME["fg"], font=("Segoe UI Semibold", 10)).pack(side=tk.LEFT)
             counter = tk.Label(head, text="", bg=bg, fg=THEME["muted"], font=("Segoe UI", 9))
             counter.pack(side=tk.RIGHT)
-            tk.Label(box, text=hint, bg=bg, fg=THEME["muted"], font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT,
-                     wraplength=640).pack(fill=tk.X, padx=12)
-            txt = tk.Text(box, height=8, wrap=tk.WORD, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"],
-                          relief=tk.FLAT, padx=8, pady=6, font=("Segoe UI", 10), undo=True, width=60)
-            txt.pack(fill=tk.X, padx=12, pady=6)
-            txt.bind("<KeyRelease>", lambda _e, k=key: self.prompt_counter(k))
-            row = tk.Frame(box, bg=bg)
-            row.pack(fill=tk.X, padx=12, pady=(0, 10))
-            self.btn(row, "💾 Guardar no servidor", lambda k=key: self.save_prompt(k), THEME["accent"]).pack(side=tk.LEFT)
-            self.btn(row, "↺ Repor padrão", lambda k=key: self.reset_prompt(k)).pack(side=tk.LEFT, padx=8)
-            self.prompt_widgets[key] = (txt, counter)
-        self.build_directive_status(right)
+            tk.Label(col, text=hint, bg=bg, fg=THEME["muted"], font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT,
+                     wraplength=520).pack(fill=tk.X, padx=12)
+            foot = tk.Frame(col, bg=bg)
+            foot.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=8)
+            self.btn(foot, "➕ Adicionar diretriz", lambda k=key: self.directive_dialog(k), THEME["accent"]).pack(side=tk.LEFT)
+            self.btn(foot, "↺ Repor todas", lambda k=key: self.directive_revert_scope(k)).pack(side=tk.LEFT, padx=8)
+            wrap, inner = self.make_scroll_area(col, bg)
+            wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+            warn = tk.Label(col, text="", bg=bg, fg=THEME["warn"], font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT, wraplength=520)
+            self.dir_cols[key] = {"inner": inner, "counter": counter, "warn": warn, "wrap": wrap}
         self.prompts_ui_fill()
 
-    def build_directive_status(self, parent):
-        """Quadro «Estado de cada diretriz»: em vigor, fiabilidade no teu modelo e se o fine-tune ajuda. Só informação:
-        nada disto é enviado ao modelo."""
-        self._dir_rows = {}
-        card = self.card(parent)
-        card.pack(fill=tk.BOTH, expand=True, pady=8)
-        bg = card.cget("bg")
-        tk.Label(card, text="📊 Estado de cada diretriz (padrão do app.py)", bg=bg, fg=THEME["fg"],
-                 font=("Segoe UI Semibold", 10)).pack(anchor=tk.W, padx=12, pady=(10, 2))
-        self.dir_cost = tk.Label(card, text="", bg=bg, fg=THEME["muted"], font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W, wraplength=560)
-        self.dir_cost.pack(fill=tk.X, padx=12)
-        cols = ("id", "text", "force", "rel", "ft")
-        tv = ttk.Treeview(card, columns=cols, show="headings", height=13, selectmode="browse")
-        for c, w, h in (("id", 44, "#"), ("text", 230, "Diretriz"), ("force", 84, "Em vigor"), ("rel", 80, "Fiabilidade"), ("ft", 110, "Fine-tune")):
-            tv.heading(c, text=h)
-            tv.column(c, width=w, anchor=tk.W, stretch=(c == "text"))
-        tv.pack(fill=tk.X, padx=12, pady=6)
-        tv.bind("<<TreeviewSelect>>", lambda _e: self.directive_detail())
-        self.dir_tree = tv
-        self.dir_detail = tk.Label(card, text="", bg=bg, fg=THEME["fg"], font=("Segoe UI", 9), justify=tk.LEFT, anchor="nw",
-                                   wraplength=560, height=7)
-        self.dir_detail.pack(fill=tk.X, padx=12)
-        tk.Label(card, text=self.DIRECTIVE_HELP, bg=bg, fg=THEME["muted"], font=("Segoe UI", 8), justify=tk.LEFT, anchor="nw",
-                 wraplength=560).pack(fill=tk.X, padx=12, pady=(6, 10))
+    def toggle_free_text(self):
+        self._adv_open = not self._adv_open
+        if self._adv_open:
+            self.adv_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=14, before=self.dir_detail_box)
+            self.adv_btn.config(text="▾ Avançado: texto livre")
+        else:
+            self.adv_frame.pack_forget()
+            self.adv_btn.config(text="▸ Avançado: texto livre")
+
+    def directives_total_chars(self, scope, replace_id=None, new_text=None):
+        """Caracteres do prompt (diretrizes coladas com espaço) se `replace_id` passar a ter `new_text` (ou se for acrescentada uma nova)."""
+        texts = [(new_text if d.get("id") == replace_id else d.get("text", "")) for d in (self.prompts_data or {}).get(scope + "_directives") or []]
+        if replace_id is None and new_text is not None:
+            texts.append(new_text)
+        return len(" ".join(texts))
 
     def directives_ui_fill(self):
-        tv = getattr(self, "dir_tree", None)
-        if tv is None:
+        cols = getattr(self, "dir_cols", None)
+        if not cols:
             return
         data = self.prompts_data or {}
         try:
-            tv.delete(*tv.get_children())
-            self._dir_rows = {}
-            for key, icon in (("admin", "🔐"), ("public", "🌐")):
-                for d in data.get(key + "_directives") or []:
-                    iid = f"{key}{d.get('n')}"
-                    self._dir_rows[iid] = d
-                    text = str(d.get("text") or "")
-                    tv.insert("", tk.END, iid=iid, values=(f"{icon}{d.get('n')}", text if len(text) <= 44 else text[:43] + "…",
-                                                           d.get("in_force", ""), d.get("reliability", ""), d.get("finetune", "")))
-            if not self._dir_rows:
-                self.dir_cost.config(text="Liga-te ao servidor como admin e carrega em ⟳ Recarregar. Se continuar vazio, "
-                                          "atualiza o servidor para a versão 6.3.1.")
-            else:
+            self._dir_rows, self._dir_frames = {}, {}
+            mx = int(data.get("max_chars", 3000) or 3000)
+            for key in ("admin", "public"):
+                col = cols[key]
+                for w in col["inner"].winfo_children():
+                    w.destroy()
+                items = data.get(key + "_directives") or []
+                for d in items:
+                    self._dir_rows[(key, d["id"])] = d
+                    self.directive_row(col["inner"], key, d)
+                removed = data.get(key + "_removed") or []
+                if removed:
+                    tk.Label(col["inner"], text="Diretrizes padrão removidas (podes repô-las):", bg=col["inner"].cget("bg"), fg=THEME["muted"],
+                             font=("Segoe UI", 9)).pack(anchor=tk.W, padx=4, pady=(10, 2))
+                    for r in removed:
+                        self.removed_row(col["inner"], key, r)
+                if not items and not removed:
+                    tk.Label(col["inner"], text="Liga-te ao servidor como admin e carrega em ⟳ Recarregar.\n"
+                                                "Se continuar vazio, atualiza o servidor para a versão 6.3.1 ou superior.",
+                             bg=col["inner"].cget("bg"), fg=THEME["muted"], justify=tk.LEFT).pack(anchor=tk.W, padx=8, pady=10)
+                n = len(" ".join(d.get("text", "") for d in items))
+                label = f"{len(items)} diretrizes · {n} caracteres" + (f" (≈{n // 3} tokens)" if key == "admin" else "")
+                color = THEME["danger"] if n > mx else (THEME["warn"] if key == "admin" and n > self.PROMPT_ADMIN_SOFT else THEME["muted"])
+                col["counter"].config(text=label, fg=color)
+                if data.get(key + "_custom"):
+                    col["warn"].config(text="⏸ Texto livre ativo (Avançado): está a SUBSTITUIR estas diretrizes no modelo. "
+                                            "Usa «Desativar texto livre» para estas voltarem a valer.")
+                    col["warn"].pack(fill=tk.X, padx=12, before=col["wrap"])
+                else:
+                    col["warn"].pack_forget()
+            if self._dir_rows:
                 cost = data.get("cost") or {}
-                msg = (f"🔐 = Admin (o teu modelo) · 🌐 = Público (fornecedores). O prompt de admin em vigor ocupa "
-                       f"≈ {cost.get('admin_tokens_est', '?')} tokens ({cost.get('admin_pct_ctx', '?')} % do contexto de {cost.get('ctx', '?')}).")
-                if data.get("admin_custom") or data.get("public_custom"):
-                    msg += " ⚠ Tens texto editado: este quadro descreve as diretrizes PADRÃO, não o que escreveste."
-                self.dir_cost.config(text=msg)
+                self.dir_cost.config(text=f"🔐 = Admin (o teu modelo) · 🌐 = Público (fornecedores). O prompt de admin em vigor ocupa "
+                                          f"≈ {cost.get('admin_tokens_est', '?')} tokens ({cost.get('admin_pct_ctx', '?')} % do contexto de {cost.get('ctx', '?')}).")
+            else:
+                self.dir_cost.config(text="")
+            if self._dir_sel not in self._dir_rows:
+                self._dir_sel = None
             self.directive_detail()
         except tk.TclError:
             pass
 
+    def directive_row(self, parent, scope, d):
+        alt = THEME["panel_alt"]
+        selected = self._dir_sel == (scope, d["id"])
+        row = tk.Frame(parent, bg=alt, highlightthickness=1, highlightbackground=THEME["accent_blue"] if selected else THEME["border"])
+        row.pack(fill=tk.X, pady=3, padx=2)
+        self._dir_frames[(scope, d["id"])] = row
+        top = tk.Frame(row, bg=alt)
+        top.pack(fill=tk.X, padx=8, pady=(6, 2))
+        num = tk.Label(top, text=f"#{d['n']}", bg=alt, fg=THEME["muted"], font=("Segoe UI Semibold", 9))
+        num.pack(side=tk.LEFT, anchor="n")
+        btns = tk.Frame(top, bg=alt)
+        btns.pack(side=tk.RIGHT, anchor="n")
+        self.btn(btns, "✏ Editar", lambda: self.directive_dialog(scope, d), padx=8, pady=2).pack(side=tk.LEFT)
+        self.btn(btns, "🗑 Remover", lambda: self.directive_remove(scope, d), padx=8, pady=2).pack(side=tk.LEFT, padx=(4, 0))
+        txt = tk.Label(top, text=d.get("text", ""), bg=alt, fg=THEME["fg"], font=("Segoe UI", 10), justify=tk.LEFT, anchor="nw", wraplength=300)
+        txt.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6))
+        top.bind("<Configure>", lambda e, lbl=txt: lbl.config(wraplength=max(140, e.width - 250)))
+        meta = tk.Frame(row, bg=alt)
+        meta.pack(fill=tk.X, padx=8, pady=(0, 6))
+        origin = d.get("origin", "")
+        otxt, ocol = {"padrão": ("padrão do app.py", THEME["muted"]), "editada": ("✎ editada", THEME["warn"]),
+                      "criada": ("★ criada por ti", THEME["user"])}.get(origin, (origin, THEME["muted"]))
+        tk.Label(meta, text=otxt, bg=alt, fg=ocol, font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        tk.Label(meta, text=f"  ·  Fiabilidade: {d.get('reliability', '')}  ·  Fine-tune: {d.get('finetune', '')}", bg=alt, fg=THEME["muted"],
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        if origin == "editada":
+            self.btn(meta, "↺ Repor", lambda: self.directive_revert(scope, d), padx=6, pady=0, font=("Segoe UI", 8)).pack(side=tk.RIGHT)
+        for w in (row, top, num, txt, meta):
+            w.bind("<Button-1>", lambda _e, s=scope, i=d["id"]: self.select_directive(s, i))
+
+    def removed_row(self, parent, scope, r):
+        alt = THEME["panel_alt"]
+        row = tk.Frame(parent, bg=alt, highlightthickness=1, highlightbackground=THEME["border"])
+        row.pack(fill=tk.X, pady=2, padx=2)
+        text = str(r.get("text") or "")
+        tk.Label(row, text="⊘ " + (text if len(text) <= 60 else text[:59] + "…"), bg=alt, fg=THEME["muted"], font=("Segoe UI", 9),
+                 anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=5)
+        self.btn(row, "↺ Repor", lambda: self.directive_call("POST", f"/api/directives/{scope}/{r['id']}/revert", {},
+                                                           "↺ Diretriz reposta."), padx=8, pady=2).pack(side=tk.RIGHT, padx=6, pady=3)
+
+    def select_directive(self, scope, did):
+        self._dir_sel = (scope, did)
+        for key, fr in self._dir_frames.items():
+            try:
+                fr.config(highlightbackground=THEME["accent_blue"] if key == self._dir_sel else THEME["border"])
+            except tk.TclError:
+                pass
+        self.directive_detail()
+
     def directive_detail(self):
+        d = self._dir_rows.get(self._dir_sel) if self._dir_sel else None
+        text = (f"«{d['text']}»\n\nPorquê: {d.get('note') or '—'}\n\nComo testar: {d.get('test') or '—'}" if d
+                else "Clica numa diretriz para ver o porquê e como testá-la.\n\n" + self.DIRECTIVE_HELP)
         try:
-            sel = self.dir_tree.selection()
-            d = self._dir_rows.get(sel[0]) if sel else None
-            self.dir_detail.config(text=(f"«{d['text']}»\n\nPorquê: {d['note']}\n\nComo testar: {d['test']}" if d
-                                         else "Seleciona uma diretriz para ver o porquê e como testá-la."))
-        except (tk.TclError, KeyError, AttributeError):
+            self.dir_detail.config(state=tk.NORMAL)
+            self.dir_detail.delete("1.0", tk.END)
+            self.dir_detail.insert("1.0", text)
+            self.dir_detail.config(state=tk.DISABLED)
+        except (tk.TclError, AttributeError):
             pass
+
+    # --- operações (todas passam pelo servidor, que valida e grava) ---
+    def directives_applied(self, res):
+        """Guarda a resposta do servidor e uma cópia local das listas editadas (o Render tem disco efémero: ver sync_prompts)."""
+        self.prompts_data = res
+        loc = dict(self.cfg.get("directives_local") or {})
+        for s in ("admin", "public"):
+            if res.get(s + "_managed"):
+                loc[s] = (res.get("directives_state") or {}).get(s) or loc.get(s)
+            else:
+                loc.pop(s, None)
+        self.cfg["directives_local"] = {k: v for k, v in loc.items() if v}
+        self.save_config()
+        self.prompts_ui_fill()
+
+    def directive_call(self, method, path, body, ok_msg, parent=None, on_ok=None, on_fail=None):
+        if not self.require_admin_ui():
+            return
+
+        def done(res, err):
+            if err:
+                if on_fail:
+                    try:
+                        on_fail()
+                    except tk.TclError:
+                        pass
+                messagebox.showerror("Diretrizes", f"Não consegui concluir:\n{err}", parent=parent or self)
+                return
+            self.directives_applied(res)
+            if on_ok:
+                try:
+                    on_ok()
+                except tk.TclError:
+                    pass
+            self.flash(ok_msg, THEME["bot"], ms=6000)
+
+        self.bg(lambda: self.api.call(method, path, body, timeout=40), done)
+
+    def directive_remove(self, scope, d):
+        short = d.get("text", "")
+        short = short if len(short) <= 90 else short[:89] + "…"
+        extra = ("Foi criada por ti: não há como a repor depois." if d.get("origin") == "criada"
+                 else "É uma diretriz padrão: podes repô-la depois com ↺ Repor.")
+        if messagebox.askyesno("Remover diretriz", f"Remover a diretriz #{d['n']}?\n\n«{short}»\n\n{extra}", parent=self):
+            self.directive_call("DELETE", f"/api/directives/{scope}/{d['id']}", None, "🗑 Diretriz removida.")
+
+    def directive_revert(self, scope, d):
+        if messagebox.askyesno("Repor diretriz", f"Repor a diretriz #{d['n']} para o texto padrão do app.py?\nA tua edição perde-se.", parent=self):
+            self.directive_call("POST", f"/api/directives/{scope}/{d['id']}/revert", {}, "↺ Diretriz reposta.")
+
+    def directive_revert_scope(self, scope):
+        nome = "admin" if scope == "admin" else "públicas"
+        if messagebox.askyesno("Repor todas", f"Repor TODAS as diretrizes {nome} para as do app.py?\n"
+                                              "As que criaste e as edições que fizeste perdem-se.", parent=self):
+            self.directive_call("POST", f"/api/directives/{scope}/revert", {}, f"↺ Diretrizes {nome} repostas para o padrão.")
+
+    def directive_dialog(self, scope, d=None):
+        """Adicionar (d=None) ou editar uma diretriz."""
+        if not self.require_admin_ui():
+            return
+        editing = d is not None
+        nome = "admin" if scope == "admin" else "pública"
+        panel = THEME["panel"]
+        win = tk.Toplevel(self)
+        win.title(("Editar diretriz" if editing else "Nova diretriz") + f" — {nome}")
+        win.configure(bg=panel)
+        win.geometry("660x680")
+        win.minsize(560, 560)
+        win.transient(self)
+        win.grab_set()
+        bar = tk.Frame(win, bg=panel)                           # criada primeiro: o pack reserva-lhe o espaço mesmo com a janela encolhida
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=14)
+        btn_save = self.btn(bar, "💾 Guardar", lambda: save(), THEME["accent"])
+        btn_save.pack(side=tk.LEFT)
+        self.btn(bar, "Cancelar", win.destroy).pack(side=tk.LEFT, padx=8)
+
+        def label(text):
+            tk.Label(win, text=text, bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=16, pady=(10, 2))
+
+        def textbox(height, value):
+            box = tk.Text(win, height=height, wrap=tk.WORD, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"],
+                          relief=tk.FLAT, padx=8, pady=6, font=("Segoe UI", 10), undo=True)
+            box.insert("1.0", value)
+            box.pack(fill=tk.X, padx=16)
+            return box
+
+        label("Diretriz — o texto que segue para o modelo (curto: cada caractere tira espaço à conversa)")
+        e_text = textbox(5, d.get("text", "") if editing else "")
+        counter = tk.Label(win, text="", bg=panel, fg=THEME["muted"], font=("Segoe UI", 8))
+        counter.pack(anchor=tk.E, padx=16)
+
+        def count(_e=None):
+            n = len(e_text.get("1.0", "end-1c").strip())
+            counter.config(text=f"{n}/1200 caracteres", fg=THEME["danger"] if n > 1200 else THEME["muted"])
+
+        e_text.bind("<KeyRelease>", count)
+        count()
+
+        sel = tk.Frame(win, bg=panel)
+        sel.pack(fill=tk.X, padx=16, pady=(6, 0))
+        rel_cur = (d or {}).get("reliability_key", "media")
+        ft_cur = (d or {}).get("finetune_key", "na" if scope == "public" else "nao")
+        tk.Label(sel, text="Fiabilidade no modelo", bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w")
+        tk.Label(sel, text="Fine-tune", bg=panel, fg=THEME["muted"], font=("Segoe UI", 9)).grid(row=0, column=1, sticky="w", padx=(16, 0))
+        c_rel = ttk.Combobox(sel, state="readonly", width=18, values=[v for _k, v in self.RELIABILITY_OPTS])
+        c_ft = ttk.Combobox(sel, state="readonly", width=22, values=[v for _k, v in self.FINETUNE_OPTS])
+        c_rel.set(dict(self.RELIABILITY_OPTS).get(rel_cur, "Média"))
+        c_ft.set(dict(self.FINETUNE_OPTS).get(ft_cur, "N/A (terceiros)"))
+        c_rel.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        c_ft.grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(2, 0))
+        e_pos = None
+        if not editing:
+            tk.Label(sel, text="Posição (1 = primeira; vazio = no fim)", bg=panel, fg=THEME["muted"],
+                     font=("Segoe UI", 9)).grid(row=0, column=2, sticky="w", padx=(16, 0))
+            e_pos = tk.Entry(sel, width=8, bg=THEME["code_bg"], fg=THEME["fg"], insertbackground=THEME["fg"], relief=tk.FLAT)
+            e_pos.grid(row=1, column=2, sticky="w", padx=(16, 0), pady=(2, 0), ipady=3)
+
+        label("Porquê (nota para ti — não vai para o modelo)")
+        e_note = textbox(4, d.get("note", "") if editing else "")
+        label("Como testar (não vai para o modelo)")
+        e_test = textbox(3, d.get("test", "") if editing else "")
+
+        def key_of(opts, shown, default):
+            return next((k for k, v in opts if v == shown), default)
+
+        def save():
+            text = e_text.get("1.0", "end-1c").strip()
+            if not text:
+                messagebox.showwarning("Diretriz", "A diretriz não pode ficar vazia.", parent=win)
+                return
+            if len(text) > 1200:
+                messagebox.showwarning("Diretriz", f"Máximo 1200 caracteres (tem {len(text)}).", parent=win)
+                return
+            body = {"text": text,
+                    "reliability": key_of(self.RELIABILITY_OPTS, c_rel.get(), "media"),
+                    "finetune": key_of(self.FINETUNE_OPTS, c_ft.get(), "na"),
+                    "note": e_note.get("1.0", "end-1c").strip(), "test": e_test.get("1.0", "end-1c").strip()}
+            if e_pos is not None and e_pos.get().strip():
+                try:
+                    body["position"] = max(1, int(e_pos.get().strip()))
+                except ValueError:
+                    messagebox.showwarning("Diretriz", "Posição: escreve um número (1 = primeira) ou deixa vazio.", parent=win)
+                    return
+            if scope == "admin":
+                old_n = self.directives_total_chars(scope)
+                new_n = self.directives_total_chars(scope, d["id"] if editing else None, text)
+                if new_n > self.PROMPT_ADMIN_SOFT and new_n > old_n and not messagebox.askyesno(
+                        "Prompt de admin longo",
+                        f"Com esta diretriz o prompt de admin passa a ter {new_n} caracteres. O teu modelo tem um contexto pequeno "
+                        "(cerca de 2048 tokens): quanto maior o prompt, menos sobra para a conversa e para as lições.\n\nGuardar mesmo assim?",
+                        parent=win):
+                    return
+            method, path = ("PUT", f"/api/directives/{scope}/{d['id']}") if editing else ("POST", f"/api/directives/{scope}")
+            btn_save.config(state=tk.DISABLED)
+            self.directive_call(method, path, body, "💾 Diretriz guardada — vale já no próximo pedido." if editing
+                                else "➕ Diretriz adicionada — vale já no próximo pedido.",
+                                parent=win, on_ok=win.destroy, on_fail=lambda: btn_save.config(state=tk.NORMAL))
+
+        win.bind("<Escape>", lambda _e: win.destroy())
+        e_text.focus_set()
 
     def prompt_text(self, key):
         txt, _ = self.prompt_widgets[key]
@@ -3535,7 +4036,12 @@ class GoisWindow(tk.Tk):
             push = {k: local[k] for k in ("admin", "public") if local.get(k) and not res.get(k + "_custom")}
             if push:
                 res = self.api.call("POST", "/api/prompts", push, timeout=40)
-            return res, bool(push)
+            # listas de diretrizes editadas/criadas aqui que o servidor perdeu (disco efémero): repõe-nas
+            dloc = self.cfg.get("directives_local") or {}
+            dpush = {k: dloc[k] for k in ("admin", "public") if dloc.get(k) and not res.get(k + "_managed")}
+            if dpush:
+                res = self.api.call("PUT", "/api/directives", dpush, timeout=40)
+            return res, bool(push) or bool(dpush)
 
         def done(r, err):
             if err or not r:
@@ -3588,6 +4094,9 @@ class GoisWindow(tk.Tk):
                 "quanto maior o prompt, menos sobra para a conversa e para as lições da Sala de Aula.\n\nGuardar mesmo assim?", parent=self):
             return
         default = str(self.prompts_data.get(key + "_default") or "").strip()
+        if not self.prompts_data.get(key + "_custom") and text == str(self.prompts_data.get(key) or "").strip():
+            self.flash("Sem alterações no texto livre: a lista de diretrizes continua em vigor.", THEME["muted"])
+            return                                                # evita transformar a lista em «texto livre» sem querer
         send = "" if (not text or text == default) else text      # igual ao padrão = sem personalização
         nome = "admin" if key == "admin" else "pública"
         self.push_prompt(key, send, f"💾 Diretriz {nome} guardada — vale já no próximo pedido.")
@@ -3596,8 +4105,11 @@ class GoisWindow(tk.Tk):
         if not self.require_admin_ui():
             return
         nome = "admin" if key == "admin" else "pública"
-        if messagebox.askyesno("Repor padrão", f"Repor a diretriz {nome} para o texto padrão do app.py?", parent=self):
-            self.push_prompt(key, "", f"↺ Diretriz {nome} reposta para o padrão.")
+        if not self.prompts_data.get(key + "_custom"):
+            self.flash("Não há texto livre ativo: a lista de diretrizes já é a que vale.", THEME["muted"])
+            return
+        if messagebox.askyesno("Desativar texto livre", f"Desativar o texto livre {nome}?\nA lista de diretrizes volta a valer.", parent=self):
+            self.push_prompt(key, "", f"↺ Texto livre {nome} desativado: a lista de diretrizes voltou a valer.")
 
     # ======================================================================= #
     # MODELO PRÓPRIO (LM Studio + túnel Cloudflare + servidor)
