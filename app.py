@@ -132,6 +132,7 @@ def default_settings() -> dict:
         },
         "comparison": {"categories": {}},
         "tracked_models": {k: list(v) for k, v in DEFAULT_TRACKED.items()},
+        "directive_eval": {},                       # medições REAIS por diretriz: {âmbito: {id: {...}}}
         "prompts": {"admin": "", "public": ""},   # diretrizes editadas no painel ("" = usar o padrão do código)
     }
 
@@ -717,16 +718,23 @@ def removed_directives(scope: str) -> list:
 
 
 def directives_view(is_admin: bool) -> list:
-    """Estado de cada diretriz para o painel (os metadados nunca vão para o modelo)."""
+    """Estado de cada diretriz para o painel. Fiabilidade e fine-tune vêm das MEDIÇÕES reais (evaluate_directive);
+    sem medição (ou com o texto editado depois) aparecem como «Por medir»."""
     scope = "admin" if is_admin else "public"
     override = bool(str((DB_SETTINGS.get("prompts") or {}).get(scope) or "").strip())
+    evs = (DB_SETTINGS.get("directive_eval") or {}).get(scope) or {}
     out = []
     for i, d in enumerate(directive_list(scope), 1):
+        ev = evs.get(d["id"])
+        fresh = bool(ev) and ev.get("hash") == _dhash(d["text"])
+        rel_k, ft_k = classify_eval(scope, ev) if fresh else ("", "na" if scope == "public" else "")
+        pending = "Desatualizada (texto editado): mede de novo" if ev and not fresh else "Por medir"
         out.append({"n": i, "id": d["id"], "text": d["text"], "origin": _directive_origin(scope, d),
                     "in_force": "⏸ Substituída pelo texto livre" if override else "✅ Em vigor",
-                    "reliability": DIRECTIVE_LABELS["reliability"].get(d["reliability"], d["reliability"]),
-                    "finetune": DIRECTIVE_LABELS["finetune"].get(d["finetune"], d["finetune"]),
-                    "reliability_key": d["reliability"], "finetune_key": d["finetune"],
+                    "reliability": DIRECTIVE_LABELS["reliability"].get(rel_k, pending),
+                    "finetune": DIRECTIVE_LABELS["finetune"].get(ft_k, pending),
+                    "reliability_key": rel_k, "finetune_key": ft_k,
+                    "measured": fresh, "eval": ev if fresh else None,
                     "note": d["note"], "test": d["test"]})
     return out
 
@@ -743,6 +751,7 @@ def prompts_view() -> dict:
     managed = DB_SETTINGS.get("directives") or {}
     return {"admin": active_prompt(True), "public": active_prompt(False),
             "admin_directives": directives_view(True), "public_directives": directives_view(False), "cost": prompt_cost(),
+            "eval": eval_view(),
             "admin_removed": removed_directives("admin"), "public_removed": removed_directives("public"),
             "admin_managed": "admin" in managed, "public_managed": "public" in managed,
             "directives_state": {s: [dict(d) for d in directive_list(s)] for s in DIRECTIVE_SCOPES},
@@ -752,7 +761,7 @@ def prompts_view() -> dict:
             "max_chars": PROMPT_MAX_CHARS}
 
 
-def prepare_messages(messages: list, is_admin: bool = False, extra_context: str = "") -> list:
+def prepare_messages(messages: list, is_admin: bool = False, extra_context: str = "", prompt_override=None) -> list:
     cleaned = []
     for m in messages:
         if isinstance(m, dict):
@@ -763,7 +772,7 @@ def prepare_messages(messages: list, is_admin: bool = False, extra_context: str 
     if not cleaned:
         cleaned = [{"role": "user", "content": "Olá"}]
 
-    sys_content = active_prompt(is_admin)
+    sys_content = prompt_override if prompt_override is not None else active_prompt(is_admin)
     kn_limit = 2400
     if is_admin and LOCAL_PROVIDER["url"]:
         # ~3 caracteres por token; o prompt pode ocupar metade do contexto (a outra metade fica para a resposta).
@@ -804,7 +813,7 @@ async def try_providers(messages, temperature=0.6, only=None, models=None, timeo
                             # Streaming: o túnel (Cloudflare) corta com HTTP 524 se o modelo demorar >100 s a responder
                             # de uma só vez; em streaming os dados vão chegando e a ligação não é cortada.
                             body["stream"] = True
-                            parts, usage = [], None
+                            parts, usage, fin = [], None, None
                             async with client.stream("POST", p["url"], json=body, headers=headers,
                                                      timeout=LOCAL_TIMEOUT) as sresp:
                                 if sresp.status_code != 200:
@@ -829,9 +838,10 @@ async def try_providers(messages, temperature=0.6, only=None, models=None, timeo
                                             usage = j["usage"]
                                         for ch in j.get("choices") or []:
                                             parts.append(((ch.get("delta") or {}).get("content")) or "")
+                                            fin = ch.get("finish_reason") or fin
                             text = "".join(parts).strip()
                             if text:
-                                data = {"choices": [{"message": {"role": "assistant", "content": text}}]}
+                                data = {"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": fin}]}
                                 if usage:
                                     data["usage"] = usage
                                 return data, p["name"], model_name, errors
@@ -1354,6 +1364,161 @@ async def run_benchmark(cat: str, question: str = "", gois_answer: str = "") -> 
                 "scores": by_name, "missing": missing, "judge": judge, "gois_score": by_name["gois"]}
 
 
+# --------------------------------------------------------------------------- #
+# Medição REAL das diretrizes (fiabilidade + necessidade de fine-tune)
+# Nada disto é opinião: cada diretriz é posta à prova no sistema real (prompt completo + lições + limite de contexto,
+# o mesmo caminho do chat), com e sem a diretriz, e um juiz dá a nota de cumprimento às cegas.
+# --------------------------------------------------------------------------- #
+DIRECTIVE_EVAL_N = 3
+DIRECTIVE_EVAL_MAX_N = 6
+RELIABILITY_HIGH, RELIABILITY_MID = 80.0, 50.0
+TRUNCATED_LIMIT = 0.5          # >= 50 % das respostas cortadas pelo contexto -> o fine-tune não resolve
+EVAL_TASK = None
+EVAL_STATE = {"error": "", "at": None, "done": 0, "total": 0}
+
+
+def _dhash(text: str) -> str:
+    return uuid.uuid5(uuid.NAMESPACE_URL, str(text or "").strip()).hex[:10]
+
+
+def classify_eval(scope: str, ev: dict):
+    """(fiabilidade, fine-tune) a partir das medições. Fine-tune só faz sentido no teu modelo (admin)."""
+    sc = float(ev.get("score") or 0)
+    rel = "alta" if sc >= RELIABILITY_HIGH else ("media" if sc >= RELIABILITY_MID else "baixa")
+    if scope != "admin":
+        ft = "na"
+    elif sc >= RELIABILITY_HIGH:
+        ft = "nao"
+    elif float(ev.get("truncated") or 0) >= TRUNCATED_LIMIT:
+        ft = "nao_resolve"
+    else:
+        ft = "ajuda"
+    return rel, ft
+
+
+def eval_view() -> dict:
+    running = EVAL_TASK is not None and not EVAL_TASK.done()
+    return {"running": running, **EVAL_STATE}
+
+
+def finish_reason(data) -> str:
+    try:
+        return str(data["choices"][0].get("finish_reason") or "")
+    except Exception:
+        return ""
+
+
+async def make_directive_probes(d: dict, n: int) -> list:
+    hint = str(d.get("test") or "").strip()
+    msgs = [{"role": "system", "content": TEACHER_SYSTEM},
+            {"role": "user", "content": f"Diretriz de um assistente de IA: «{d['text']}»\n" + (f"Ideia de teste: {hint}\n" if hint else "")
+             + f"Escreve {n} pedidos diferentes de utilizador (mistura curtos e longos), em português europeu, que ponham esta diretriz à prova. "
+               "Um por linha, sem numeração e sem explicações."}]
+    for p in get_providers("public"):
+        if not candidate_keys(p):
+            continue
+        data, prov, _m, _e = await gated_try(p["name"], msgs, temperature=0.8, timeout=45.0,
+                                             max_tokens=400 + (REASONING_EXTRA_TOKENS if is_reasoning_model(p["models"][0]) else 0))
+        if data is None:
+            continue
+        txt = reply_text(data)
+        add_tokens(usage_tokens(data, txt), prov)
+        lines = [re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", ln).strip(" «»\"") for ln in txt.splitlines()]
+        lines = [ln for ln in lines if len(ln) >= 8]
+        if lines:
+            return lines[:n]
+    raise RuntimeError("Não consegui gerar pedidos de teste (nenhum fornecedor com chave respondeu).")
+
+
+async def eval_answer(scope: str, question: str, prompt_override=None):
+    """Resposta do sistema REAL (admin = o teu modelo; público = fornecedores). Devolve (texto, cortada_pelo_contexto)."""
+    messages = prepare_messages([{"role": "user", "content": question}], is_admin=(scope == "admin"), prompt_override=prompt_override)
+    if scope == "admin":
+        used = sum(len(m["content"]) for m in messages) // 3 + 32
+        mx = max(256, int(LOCAL_PROVIDER.get("ctx") or 2048) - used)      # o mesmo limite que o chat usa
+    else:
+        mx = 700
+    data, prov, _m, errs = await try_providers(messages, temperature=BENCH_TEMPERATURE, timeout=150.0, max_tokens=mx, scope=scope)
+    if data is None:
+        raise RuntimeError("Sem resposta do sistema (" + ("; ".join(errs[-2:]) or "sem detalhe") + ").")
+    txt = reply_text(data)
+    add_tokens(usage_tokens(data, txt), prov)
+    if not txt:
+        raise RuntimeError("Resposta vazia do sistema.")
+    return txt, finish_reason(data) == "length"
+
+
+async def judge_compliance(directive: str, question: str, with_txt: str, base_txt: str):
+    pair = [("with", with_txt), ("base", base_txt)]
+    random.shuffle(pair)
+    block = "\n\n".join(f"Resposta {'AB'[i]}:\n{t[:1800]}" for i, (_k, t) in enumerate(pair))
+    msgs = [{"role": "system", "content": "És um avaliador imparcial."},
+            {"role": "user", "content": f"Diretriz: «{directive}»\nPedido do utilizador: {question}\n\n{block}\n\n"
+                                        "Para cada resposta dá uma nota de 0 a 100 de CUMPRIMENTO da diretriz (100 = cumpre totalmente, 0 = viola). "
+                                        "Avalia só o cumprimento, não a qualidade geral. Formato: A=<nota>;B=<nota>. Responde apenas nesse formato."}]
+    for p in sorted(get_providers("public"), key=lambda x: x["name"] in CONTESTANTS):
+        if not candidate_keys(p):
+            continue
+        jdata, jprov, jmodel, _e = await gated_try(p["name"], msgs, temperature=0.0, timeout=90.0, max_tokens=60 + REASONING_EXTRA_TOKENS)
+        if jdata is None:
+            continue
+        add_tokens(usage_tokens(jdata), jprov)
+        sc = parse_scores(reply_text(jdata))
+        if "A" in sc and "B" in sc:
+            by = {pair[0][0]: min(100.0, float(sc["A"])), pair[1][0]: min(100.0, float(sc["B"]))}
+            return by["with"], by["base"], f"{jprov}/{jmodel}"
+    raise RuntimeError("O juiz não devolveu notas válidas.")
+
+
+async def evaluate_directive(scope: str, did: str, n: int) -> dict:
+    items = directive_list(scope)
+    d = items[_directive_index(items, did)]
+    prompt = active_prompt(scope == "admin")
+    if d["text"] not in prompt:
+        raise RuntimeError("O texto livre (Avançado) está a substituir as diretrizes: desativa-o para as poder medir.")
+    base = " ".join(prompt.replace(d["text"], " ").split())          # o mesmo prompt, sem esta diretriz
+    if scope == "admin":
+        alive, why = await local_alive(retries=1, timeout=15.0)
+        if not alive:
+            raise RuntimeError("O servidor não consegue falar com o teu modelo: " + why + ".")
+    probes = await make_directive_probes(d, n)
+    rows, judge, errs = [], "", []
+    for q in probes:
+        try:
+            w_txt, w_cut = await eval_answer(scope, q)
+            b_txt, _b_cut = await eval_answer(scope, q, prompt_override=base)
+            sw, sb, judge = await judge_compliance(d["text"], q, w_txt, b_txt)
+        except Exception as e:
+            errs.append(str(e)[:120])
+            continue
+        rows.append({"q": q[:200], "with": sw, "without": sb, "cut": w_cut})
+    if not rows:
+        raise RuntimeError("Nenhum teste concluído: " + ("; ".join(errs[-2:]) or "sem detalhe"))
+    k = len(rows)
+    ev = {"score": round(sum(r["with"] for r in rows) / k, 1), "baseline": round(sum(r["without"] for r in rows) / k, 1),
+          "n": k, "truncated": round(sum(1 for r in rows if r["cut"]) / k, 2), "at": now_iso(),
+          "hash": _dhash(d["text"]), "judge": judge, "probes": rows}
+    DB_SETTINGS.setdefault("directive_eval", {}).setdefault(scope, {})[did] = ev
+    return ev
+
+
+async def run_directive_eval(scope: str, ids: list, n: int) -> None:
+    EVAL_STATE.update(error="", at=None, done=0, total=len(ids))
+    try:
+        async with job_slot("directives", scope):
+            for did in ids:
+                CURRENT_JOB["category"] = f"{scope} · {EVAL_STATE['done'] + 1}/{len(ids)}"
+                try:
+                    await evaluate_directive(scope, did, n)
+                except Exception as e:
+                    EVAL_STATE["error"] = str(e)[:300]
+                    break                                # pára no primeiro erro (não gasta tokens à toa)
+                EVAL_STATE["done"] += 1
+                save_db()
+    finally:
+        EVAL_STATE["at"] = now_iso()
+
+
 async def classroom_loop() -> None:
     global CLASSROOM_TASK
     try:
@@ -1425,6 +1590,7 @@ def settings_view() -> dict:
     view = dict(DB_SETTINGS)
     view.pop("skills_trash", None)      # têm endpoints próprios (/api/skills/trash, /api/directives)
     view.pop("directives", None)
+    view.pop("directive_eval", None)
     view["providers_with_key"] = [p["name"] for p in get_providers("public") if candidate_keys(p)]
     view["own_model_only"] = False          # já não é um interruptor global: ver admin_uses_own_model
     view["admin_uses_own_model"] = True     # admin -> só o teu modelo
@@ -1693,6 +1859,36 @@ async def edit_directive(scope: str, did: str, request: Request):
 async def delete_directive(scope: str, did: str, request: Request):
     await require_admin(request)
     _managed_call(directive_remove, _dir_scope(scope), did)
+    return prompts_view()
+
+
+@app.post("/api/directives/{scope}/evaluate")
+async def evaluate_directives(scope: str, request: Request):
+    """Mede a fiabilidade e a necessidade de fine-tune no sistema real. Corre em segundo plano (consulta /api/prompts → «eval»).
+    Corpo opcional: {"ids": ["admin-1", ...], "n": 3}; sem «ids» mede todas as do âmbito."""
+    global EVAL_TASK
+    await require_admin(request)
+    scope = _dir_scope(scope)
+    if EVAL_TASK is not None and not EVAL_TASK.done():
+        raise HTTPException(409, "Já há uma medição de diretrizes em curso.")
+    if JOB_LOCK.locked():
+        raise HTTPException(409, "O servidor está ocupado com outra tarefa (estudo ou benchmark): tenta daqui a pouco.")
+    body = await _json_body(request)
+    items = directive_list(scope)
+    ids = body.get("ids") or [d["id"] for d in items]
+    if not isinstance(ids, list):
+        raise HTTPException(400, "ids: tem de ser uma lista.")
+    for did in ids:
+        try:
+            _directive_index(items, str(did))
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+    try:
+        n = max(1, min(DIRECTIVE_EVAL_MAX_N, int(body.get("n") or DIRECTIVE_EVAL_N)))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "n inválido.")
+    EVAL_STATE.update(error="", at=None, done=0, total=len(ids))
+    EVAL_TASK = asyncio.create_task(run_directive_eval(scope, [str(i) for i in ids], n))
     return prompts_view()
 
 
@@ -1974,6 +2170,13 @@ async def keys_status(request: Request):
                              "source": "environment" if env_set else ("runtime" if run_set else ""),
                              "model": p["models"][0], "render_sync": render_sync_enabled()}
     return status
+
+
+@app.get("/api/keys/check/{provider}")
+async def check_key(provider: str, request: Request):
+    """Teste real e mínimo da chave + ligação de um fornecedor (botão ⟳ do Environment)."""
+    await require_admin(request)
+    return await probe_provider(_provider_def(provider)["name"])
 
 
 @app.post("/api/keys")
