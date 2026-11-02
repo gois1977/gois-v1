@@ -268,6 +268,37 @@ function download(name, text){
   a.href = URL.createObjectURL(new Blob([text], {type:'text/plain;charset=utf-8'}));
   a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
 }
+// ---- ZIP do projecto (gois.v1 fornece; funciona no modo admin e no público) ----
+function guessName(p){                      // nome do ficheiro: da cerca (```py app.py) ou de um comentário na 1.ª linha (# app.py)
+  if(p.name) return p.name;
+  const first = (p.v.split('\n')[0] || '').trim();
+  const m = first.match(/^(?:#|\/\/|--|;|\/\*|<!--)\s*(?:ficheiro|file|filename|path|caminho)?\s*:?\s*([\w\-./\\]+\.[A-Za-z0-9]{1,8})\s*(?:\*\/|-->)?$/i);
+  return m ? m[1] : '';
+}
+function projectFiles(text){
+  const out = []; let n = 0;
+  fenceParts(text).forEach(p => {
+    if(p.t !== 'code' || !p.v.trim()) return;
+    n++;
+    const name = guessName(p) || `codigo_${n}.${EXT[p.lang] || 'txt'}`;
+    out.push({path: name, content: p.v});
+  });
+  return out;
+}
+async function downloadZip(files, btn){
+  const c = chat(), o = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ A preparar o ZIP…';
+  try{
+    const r = await fetch(API + '/api/zip', {method:'POST', headers:hdrs(), body:JSON.stringify({name:(c && c.title) || 'projecto', files})});
+    if(!r.ok){ let d = ''; try{ d = (await r.json()).detail; }catch(e){} throw new Error(d || ('HTTP ' + r.status)); }
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '', m = cd.match(/filename="?([^";]+)"?/);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = m ? m[1] : 'projecto.zip';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+    btn.textContent = '✅ ZIP pronto!';
+  }catch(e){ btn.textContent = '❌ ' + (e.message || 'Falhou'); }
+  setTimeout(()=>{ btn.textContent = o; btn.disabled = false; }, 2500);
+}
 function mk(tag, cls, txt){ const e = document.createElement(tag); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
 
 function renderBot(text){
@@ -298,7 +329,10 @@ function addMsg(role, m, streaming){
       const a = mk('div','msg-acts');
       const c = mk('button','sm','📋 Copiar resposta'); c.onclick = () => copyText(m.content, c);
       const d = mk('button','sm','💾 Guardar (.md)'); d.onclick = () => download('resposta.md', m.content);
-      a.append(c, d); el.appendChild(a);
+      a.append(c, d);
+      const pf = projectFiles(m.content);
+      if(pf.length){ const z = mk('button','sm','📦 Download ZIP do projecto (' + pf.length + (pf.length === 1 ? ' ficheiro' : ' ficheiros') + ')'); z.onclick = () => downloadZip(pf, z); a.appendChild(z); }
+      el.appendChild(a);
     }
   }
   w.appendChild(el); $('chat').appendChild(w); scrollEnd(); return el;
