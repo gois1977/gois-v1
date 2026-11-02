@@ -891,9 +891,24 @@ async def make_llm_request(payload: dict, is_admin: bool = False):
     return data, []
 
 
-async def stream_llm_request(payload: dict, is_admin: bool = False):
-    messages = prepare_messages(payload.get("messages", []), is_admin)
-    scope = "admin" if is_admin else "public"
+def stream_error_message(scope: str, errors: list) -> str:
+    """Mensagem para o utilizador com a CAUSA provável (o detalhe completo fica nos logs do Render)."""
+    if scope == "admin":
+        return OFFLINE_MSG
+    if not any(candidate_keys(p) for p in PROVIDERS):
+        return "Nenhuma chave API configurada no servidor (Render > Environment)."
+    codes = {e[2] for e in errors}
+    if 429 in codes:
+        return "Os fornecedores atingiram o limite de pedidos ou de tokens. Tenta daqui a pouco."
+    if codes & {400, 413}:
+        return "A conversa é demasiado longa para os fornecedores. Começa uma conversa nova."
+    if codes & {401, 403}:
+        return "Uma chave API foi recusada por um fornecedor (verifica o Render > Environment)."
+    return "Erro na execução do gois.v1."
+
+
+async def _stream_once(messages: list, payload: dict, scope: str, errors: list, state: dict):
+    """Uma passagem por todos os fornecedores/chaves/modelos. Regista cada falha (estado HTTP + excerto) em `errors` e nos logs."""
     timeout = httpx.Timeout(120.0, connect=15.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for p in get_providers(scope):
@@ -911,6 +926,12 @@ async def stream_llm_request(payload: dict, is_admin: bool = False):
                         async with client.stream("POST", p["url"], json=body, headers=headers,
                                                  timeout=httpx.Timeout(LOCAL_TIMEOUT if p.get("local") else 120.0, connect=15.0)) as resp:
                             if resp.status_code != 200:
+                                try:
+                                    detail = (await resp.aread()).decode("utf-8", "replace")[:300].replace("\n", " ")
+                                except Exception:
+                                    detail = ""
+                                errors.append((p["name"], model_name, resp.status_code, detail))
+                                logger.warning("stream %s/%s -> HTTP %s %s", p["name"], model_name, resp.status_code, detail)
                                 continue
                             async for line in resp.aiter_lines():
                                 line = line.strip()
@@ -931,14 +952,39 @@ async def stream_llm_request(payload: dict, is_admin: bool = False):
                                 yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
                         if got_content:
                             add_tokens(max(1, chars // 4), p["name"])
+                            state["ok"] = True
                             yield "data: [DONE]\n\n"
                             return
+                        errors.append((p["name"], model_name, 0, "resposta vazia"))
+                        logger.warning("stream %s/%s -> resposta vazia", p["name"], model_name)
                     except Exception as e:
-                        logger.warning("stream %s/%s: %s", p["name"], model_name, type(e).__name__)
+                        logger.warning("stream %s/%s: %s %s", p["name"], model_name, type(e).__name__, str(e)[:200])
+                        errors.append((p["name"], model_name, 0, type(e).__name__))
                         if got_content:
+                            state["ok"] = True
                             yield "data: [DONE]\n\n"
                             return
-    yield "data: " + json.dumps({"error": {"message": OFFLINE_MSG if scope == "admin" else "Erro na execução do gois.v1."}}, ensure_ascii=False) + "\n\n"
+
+
+async def stream_llm_request(payload: dict, is_admin: bool = False):
+    messages = prepare_messages(payload.get("messages", []), is_admin)
+    scope = "admin" if is_admin else "public"
+    errors, state = [], {"ok": False}
+    async for chunk in _stream_once(messages, payload, scope, errors, state):
+        yield chunk
+    if state["ok"]:
+        return
+    # Conversa grande demais para o plano grátis (HTTP 400/413): repete só com o prompt + a última mensagem do utilizador.
+    if scope == "public" and any(e[2] in (400, 413) for e in errors) and len(messages) > 2:
+        last = next((m for m in reversed(messages) if m["role"] == "user"), None)
+        if last:
+            slim = [messages[0], {"role": "user", "content": last["content"][:6000]}]
+            logger.warning("stream: a repetir com contexto reduzido (%d -> 2 mensagens)", len(messages))
+            async for chunk in _stream_once(slim, payload, scope, errors, state):
+                yield chunk
+            if state["ok"]:
+                return
+    yield "data: " + json.dumps({"error": {"message": stream_error_message(scope, errors)}}, ensure_ascii=False) + "\n\n"
     yield "data: [DONE]\n\n"
 
 
