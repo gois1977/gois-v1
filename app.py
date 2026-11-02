@@ -25,7 +25,7 @@ ENVIRONMENT GERIDO (novo na 6.4): GET /api/env lista TODAS as variáveis do serv
 SKILLS NO DATASET (novo): /api/dataset junta SEMPRE as lições e as skills. As skills também se editam, revertem (versão anterior),
   apagam (vão para o lixo e restauram-se) — PUT /api/skills/{id}, POST .../revert, POST .../restore, GET /api/skills/trash.
 
-Variáveis de ambiente (Render > Environment):
+ZIP DO PROJECTO (novo): POST /api/zip recebe {"name": "...", "files": [{"path": "src/app.py", "content": "..."}]} e devolve um .zip\n  pronto a descarregar. Funciona para o admin e para o público (o público tem limite de pedidos). O chat mostra o botão\n  «Download ZIP do projecto» por baixo de cada resposta do gois.v1 que traga ficheiros de código.\n\nVariáveis de ambiente (Render > Environment):
   GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY   (pelo menos uma)
   DATA_DIR           (opcional) pasta onde guardar gois_db.json
   RENDER_API_KEY     (opcional) chave da API do Render (Account Settings > API Keys). Com ela, inserir / alterar / remover uma
@@ -39,9 +39,11 @@ Modelo próprio (LM Studio / qualquer servidor compatível com a API OpenAI):
   GOIS_LOCAL_TIMEOUT     segundos de espera por resposta (opcional, por defeito 240)
   GOIS_ONLY_OWN_MODEL    (obsoleto na 6.1: ignorado; o admin usa sempre só o teu modelo)
 """
+import io
 import os
 import re
 import math
+import zipfile
 import json
 import time
 import uuid
@@ -57,12 +59,12 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger("uvicorn.error")
 
-VERSION = "6.5.0"
+VERSION = "6.6.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE_DIR / "data"))
 DB_FILE = DATA_DIR / "gois_db.json"
@@ -2631,6 +2633,83 @@ async def models_track(request: Request):
         tr.remove(model)
     save_db()
     return settings_view()
+
+
+# --------------------------------------------------------------------------- #
+# ZIP do projecto (admin e público)
+# --------------------------------------------------------------------------- #
+ZIP_MAX_FILES = 200
+ZIP_MAX_BYTES = 3_000_000          # tamanho total do texto aceite por pedido
+ZIP_MAX_DEPTH = 8
+
+
+def _zip_name(name, default: str = "projecto") -> str:
+    base = re.sub(r"[^\w\-]+", "_", str(name or "").strip(), flags=re.UNICODE).strip("_")[:60]
+    return base or default
+
+
+def _zip_path(raw, idx: int) -> str:
+    """Caminho seguro dentro do zip: sem «..», sem raiz/unidade, sem caracteres proibidos no Windows."""
+    p = str(raw or "").replace("\\", "/").strip()
+    p = re.sub(r"^[A-Za-z]:", "", p)
+    parts = []
+    for part in p.split("/"):
+        part = re.sub(r'[<>:"|?*\x00-\x1f]', "_", part).strip()
+        if part in ("", ".", ".."):
+            continue
+        parts.append(part[:100])
+    if not parts:
+        return f"ficheiro_{idx}.txt"
+    return "/".join(parts[-ZIP_MAX_DEPTH:])
+
+
+def build_project_zip(name: str, files: list) -> bytes:
+    if not isinstance(files, list) or not files:
+        raise HTTPException(400, "Sem ficheiros para o ZIP.")
+    if len(files) > ZIP_MAX_FILES:
+        raise HTTPException(413, f"Ficheiros a mais (máximo {ZIP_MAX_FILES}).")
+    root = _zip_name(name)
+    seen, total = set(), 0
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for i, f in enumerate(files, 1):
+            if not isinstance(f, dict):
+                continue
+            content = f.get("content")
+            if not isinstance(content, str):
+                continue
+            total += len(content.encode("utf-8"))
+            if total > ZIP_MAX_BYTES:
+                raise HTTPException(413, "Projecto demasiado grande para o ZIP.")
+            path = _zip_path(f.get("path") or f.get("name"), i)
+            if path in seen:                         # nomes repetidos: ficheiro.py -> ficheiro_2.py
+                stem, dot, ext = path.rpartition(".") if "." in path.rsplit("/", 1)[-1] else (path, "", "")
+                n = 2
+                while f"{stem}_{n}{dot}{ext}" in seen:
+                    n += 1
+                path = f"{stem}_{n}{dot}{ext}"
+            seen.add(path)
+            info = zipfile.ZipInfo(f"{root}/{path}", date_time=datetime.now().timetuple()[:6])
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            z.writestr(info, content.encode("utf-8"))
+    if not seen:
+        raise HTTPException(400, "Sem ficheiros válidos para o ZIP.")
+    return buf.getvalue()
+
+
+@app.post("/api/zip")
+async def project_zip(request: Request):
+    """O gois.v1 fornece o projecto em .zip. Aberto ao público (com limite de pedidos); o admin não tem limite."""
+    if not is_admin_req(request):
+        rate_limit_public(request, limit=10, window=60)
+    body = await _json_body(request)
+    data = await asyncio.to_thread(build_project_zip, body.get("name"), body.get("files"))
+    fname = _zip_name(body.get("name")) + ".zip"
+    return Response(content=data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                             "Cache-Control": "no-store",
+                             "Access-Control-Expose-Headers": "Content-Disposition"})
 
 
 @app.get("/", response_class=HTMLResponse)
