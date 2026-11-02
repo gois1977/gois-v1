@@ -4,6 +4,7 @@ Corre sempre como Administrador do Windows (pede elevação UAC ao abrir).
 Tema claro/escuro, totais gois.v1/Mistral/Groq sempre no topo (do mais forte ao mais fraco), comparação ao vivo com gráficos, chat com histórico
 pesquisável e anexos, Sala de Aula com cópia local e 120 skills integradas.
 """
+import io
 import os
 import re
 import math
@@ -396,6 +397,56 @@ def split_blocks(text: str):
     if last < len(text):
         blocks.append({"kind": "text", "text": text[last:]})
     return blocks
+
+
+_NAME_COMMENT_RE = re.compile(
+    r"^(?:#|//|--|;|/\*|<!--)\s*(?:ficheiro|file|filename|path|caminho)?\s*:?\s*([\w\-./\\]+\.[A-Za-z0-9]{1,8})\s*(?:\*/|-->)?$", re.I)
+ZIP_MAX_FILES = 200
+ZIP_MAX_BYTES = 3_000_000
+
+
+def block_name(b: dict, idx: int) -> str:
+    """Nome do ficheiro de um bloco de código: da cerca (```py src/app.py), de um comentário na 1.ª linha, ou codigo_N.ext."""
+    if b.get("fname"):
+        return b["fname"]
+    first = (b.get("code") or "").split("\n", 1)[0].strip()
+    m = _NAME_COMMENT_RE.match(first)
+    return m.group(1) if m else f"codigo_{idx}.{EXT.get(b.get('lang'), 'txt')}"
+
+
+def zip_safe_path(raw, idx: int) -> str:
+    """Caminho seguro dentro do zip: sem «..», sem raiz/unidade e sem caracteres proibidos no Windows."""
+    p = re.sub(r"^[A-Za-z]:", "", str(raw or "").replace("\\", "/").strip())
+    parts = [re.sub(r'[<>:"|?*\x00-\x1f]', "_", x).strip()[:100] for x in p.split("/")]
+    parts = [x for x in parts if x not in ("", ".", "..")]
+    return "/".join(parts[-8:]) if parts else f"ficheiro_{idx}.txt"
+
+
+def build_project_zip(title: str, code_blocks: list) -> bytes:
+    """Junta os blocos de código de uma resposta num .zip (pasta raiz = título da conversa). Funciona offline."""
+    root = re.sub(r"[^\w\-]+", "_", str(title or "").strip()).strip("_")[:60] or "projecto"
+    seen, total = set(), 0
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for i, b in enumerate(code_blocks[:ZIP_MAX_FILES], 1):
+            code = b.get("code") or ""
+            if not code.strip():
+                continue
+            total += len(code.encode("utf-8"))
+            if total > ZIP_MAX_BYTES:
+                raise ValueError("Projecto demasiado grande para o ZIP (máx. 3 MB de texto).")
+            path = zip_safe_path(block_name(b, i), i)
+            if path in seen:                                   # nomes repetidos: main.py -> main_2.py
+                stem, ext = os.path.splitext(path)
+                n = 2
+                while f"{stem}_{n}{ext}" in seen:
+                    n += 1
+                path = f"{stem}_{n}{ext}"
+            seen.add(path)
+            z.writestr(f"{root}/{path}", code.encode("utf-8"))
+    if not seen:
+        raise ValueError("Sem ficheiros para o ZIP.")
+    return buf.getvalue()
 
 
 _CHAT_HEAD_RE = re.compile(r"^##\s+(Tu|gois\.v1)\s*$", re.I)
@@ -1944,6 +1995,26 @@ class GoisWindow(tk.Tk):
             Path(folder, Path(name).name).write_text(b["code"], encoding="utf-8")
         self.flash(f"💾 {len(blocks)} ficheiros guardados em {folder}", THEME["bot"])
 
+    def save_project_zip(self, blocks):
+        """📦 O gois.v1 entrega o projecto (todos os blocos de código da resposta) num único .zip."""
+        sess = self.cur_session() or {}
+        title = sess.get("title") or "projecto"
+        try:
+            data = build_project_zip(title, blocks)
+        except Exception as e:
+            self.flash(f"❌ ZIP: {e}", THEME["danger"], 8000)
+            return
+        name = (re.sub(r"[^\w\-]+", "_", title).strip("_")[:60] or "projecto") + ".zip"
+        path = filedialog.asksaveasfilename(initialfile=name, defaultextension=".zip",
+                                            filetypes=[("ZIP", "*.zip"), ("Todos os ficheiros", "*.*")])
+        if path:
+            try:
+                Path(path).write_bytes(data)
+            except Exception as e:
+                self.flash(f"❌ Não consegui gravar o ZIP: {e}", THEME["danger"], 8000)
+                return
+            self.flash(f"📦 ZIP guardado: {path}", THEME["bot"])
+
     def _forward_wheel(self, widget):
         widget.bind("<MouseWheel>", lambda e: (self.chat_text.yview_scroll(int(-e.delta / 120), "units"), "break")[1])
 
@@ -2038,6 +2109,11 @@ class GoisWindow(tk.Tk):
         if len(code_blocks) > 1:
             tk.Button(fr, text=f"📦 Guardar os {len(code_blocks)} ficheiros", bg=THEME["btn"], fg=THEME["fg"], relief=tk.FLAT,
                       font=("Segoe UI", 8), cursor="hand2", command=lambda: self.save_all_code(code_blocks)).pack(side=tk.LEFT, padx=2)
+        if code_blocks:
+            n = len(code_blocks)
+            tk.Button(fr, text=f"📦 Download ZIP do projecto ({n} {'ficheiro' if n == 1 else 'ficheiros'})", bg=THEME["accent_blue"],
+                      fg="#ffffff", relief=tk.FLAT, font=("Segoe UI", 8, "bold"), cursor="hand2",
+                      command=lambda: self.save_project_zip(code_blocks)).pack(side=tk.LEFT, padx=2)
         self._emb.append(fr)
         self._forward_wheel(fr)
         t.window_create(tk.END, window=fr, padx=10, pady=2)
